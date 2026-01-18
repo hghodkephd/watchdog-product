@@ -1,0 +1,18 @@
+# Watchdog Environmental Monitor - Production Requirements
+
+# Core BLE scanning (from validated OSS)
+bleak>=0.21.0
+
+# Web dashboard
+streamlit>=1.29.0
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Weather API
+requests>=2.31.0
+
+# System monitoring
+psutil>=5.9.0
+platformdirs>=4.0.0

@@ -1,0 +1,19 @@
+[Unit]
+Description=Watchdog Environmental Monitor - BLE Scanning Service
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/watchdog
+ExecStart=/home/pi/watchdog-env/bin/python3 -m ble_core
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target

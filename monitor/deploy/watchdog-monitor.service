@@ -1,0 +1,31 @@
+[Unit]
+Description=Watchdog Environmental Monitor - BLE Service
+After=network-online.target bluetooth.target
+Wants=network-online.target bluetooth.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/watchdog
+ExecStart=/home/pi/watchdog/venv/bin/python ble_watchdog.py
+
+Restart=always
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+Environment=PYTHONUNBUFFERED=1
+
+MemoryMax=256M
+Nice=-5
+
+StandardOutput=journal
+StandardError=journal
+
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+

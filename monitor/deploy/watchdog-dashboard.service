@@ -1,0 +1,27 @@
+[Unit]
+Description=Watchdog Environmental Monitor - Dashboard
+After=watchdog-monitor.service
+Wants=watchdog-monitor.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/watchdog
+ExecStart=/home/pi/watchdog/venv/bin/streamlit run app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
+
+Restart=on-failure
+RestartSec=30s
+
+Environment=PYTHONUNBUFFERED=1
+
+MemoryMax=384M
+Nice=0
+
+StandardOutput=journal
+StandardError=journal
+
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
