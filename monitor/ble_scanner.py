@@ -423,7 +423,7 @@ async def main():
     def print_reading(reading: SensorReading):
         temp_f = reading.temp_c * 9/5 + 32
         _log_ble.info(
-            "%s | Temp: %5.1fÃ‚Â°C (%5.1fÃ‚Â°F) | Humidity: %4.1f%% | Battery: %3d%% | RSSI: %4d dBm",
+            "%s | Temp: %5.1f°C (%5.1f°F) | Humidity: %4.1f%% | Battery: %3d%% | RSSI: %4d dBm",
             f"{reading.sensor_id:15}",
             reading.temp_c,
             temp_f,
