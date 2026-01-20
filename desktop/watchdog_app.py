@@ -12,7 +12,7 @@ from typing import Optional
 
 import webview
 
-from config import Config
+from app_config import Config
 from discovery import verify_connection, discover_watchdog_fast
 
 __version__ = "1.0.0"
