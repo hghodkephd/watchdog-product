@@ -293,7 +293,7 @@ class SetupAPI:
     
     def quick_verify(self, ip: str) -> dict:
         """Quick verification of a known IP (500ms timeout)."""
-        if verify_connection(ip, timeout=0.5):
+        if verify_connection(ip, port=8501, timeout=0.5):
             return {"success": True}
         return {"success": False}
     
@@ -313,7 +313,8 @@ class SetupAPI:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(verify_connection, ip, 80, 0.5): ip 
+                
+                executor.submit(verify_connection, ip, 8501, 0.8): ip 
                 for ip in common_ips
             }
             try:
@@ -331,7 +332,7 @@ class SetupAPI:
     
     def connect(self, ip: str) -> dict:
         """Connect and launch dashboard."""
-        if verify_connection(ip, timeout=2.0):
+        if verify_connection(ip, port=8501, timeout=2.0):
             self.app.config.set("watchdog_ip", ip)
             self.app.window.load_url(f"http://{ip}")
             self.app.window.resize(1200, 800)

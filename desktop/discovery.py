@@ -4,30 +4,30 @@
 import socket
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from typing import Optional
 
 
-def verify_connection(ip: str, port: int = 80, timeout: float = 0.5) -> bool:
+def verify_connection(ip: str, port: int = 8501, timeout: float = 1.0) -> bool:
     """
-    Check if Watchdog is reachable at the given IP.
-    
-    Args:
-        ip: IP address to check
-        port: Port to connect to (default 80)
-        timeout: Connection timeout in seconds (default 0.5 for LAN)
-    
-    Returns:
-        True if connection succeeds, False otherwise
-    """
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
-        sock.close()
-        return result == 0
-    except (socket.error, OSError):
-        return False
+    Verify that a Watchdog dashboard is reachable.
 
+    We prefer an HTTP check over a raw socket check to avoid false positives
+    (port open but wrong service / stale endpoint).
+    """
+    url = f"http://{ip}:{port}/"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "watchdog-desktop"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Any 2xx is fine
+            if not (200 <= resp.status < 300):
+                return False
+            # Read a small chunk to confirm it's actually serving content
+            _ = resp.read(256)
+            return True
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+        return False
 
 def discover_watchdog_fast() -> Optional[str]:
     """
