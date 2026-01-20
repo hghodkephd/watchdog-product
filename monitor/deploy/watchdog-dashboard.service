@@ -13,7 +13,7 @@ ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/app.py
 ExecStart=__WATCHDOG_DIR__/venv/bin/streamlit run app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
 
 
-Restart=on-failure
+Restart=always
 RestartSec=30s
 
 Environment=PYTHONUNBUFFERED=1

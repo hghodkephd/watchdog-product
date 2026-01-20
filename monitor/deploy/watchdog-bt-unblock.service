@@ -5,7 +5,7 @@ Wants=bluetooth.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash _WATCHDOG_DIR_/deploy/watchdog-bt-unblock.sh
+ExecStart=/bin/bash __WATCHDOG_DIR__/deploy/watchdog-bt-unblock.sh
 RemainAfterExit=yes
 
 [Install]
