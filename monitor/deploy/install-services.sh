@@ -6,6 +6,13 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+if [[ "$1" == "--dry-run" ]]; then
+  echo "[DRY RUN] Would install services with:"
+  echo "  WATCHDOG_DIR=$WATCHDOG_DIR"
+  echo "  WATCHDOG_USER=$WATCHDOG_USER"
+  echo "  WATCHDOG_GROUP=$WATCHDOG_GROUP"
+  exit 0
+fi
 
 # Absolute path to the monitor directory (parent of this deploy/ folder)
 WATCHDOG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
