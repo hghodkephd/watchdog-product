@@ -5,10 +5,11 @@ Wants=watchdog-monitor.service
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/watchdog
-ExecStart=/home/pi/watchdog/venv/bin/streamlit run app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
+User=__WATCHDOG_USER__
+Group=__WATCHDOG_GROUP__
+WorkingDirectory=__WATCHDOG_DIR__
+ExecStart=__WATCHDOG_DIR__/venv/bin/streamlit run app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
+
 
 Restart=on-failure
 RestartSec=30s

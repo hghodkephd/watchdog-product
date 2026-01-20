@@ -5,10 +5,10 @@ Wants=network-online.target bluetooth.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/watchdog
-ExecStart=/home/pi/watchdog/venv/bin/python ble_watchdog.py
+User=__WATCHDOG_USER__
+Group=__WATCHDOG_GROUP__
+WorkingDirectory=__WATCHDOG_DIR__
+ExecStart=__WATCHDOG_DIR__/venv/bin/python ble_watchdog.py
 
 Restart=always
 RestartSec=10s
