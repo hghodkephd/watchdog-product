@@ -2,20 +2,22 @@
 Description=Watchdog Environmental Monitor - BLE Service
 After=network-online.target bluetooth.target
 Wants=network-online.target bluetooth.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 
 [Service]
 Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
 WorkingDirectory=__WATCHDOG_DIR__
-ExecStartPre=/usr/bin/test -x ${WATCHDOG_DIR}/venv/bin/python
-ExecStartPre=/usr/bin/test -f ${WATCHDOG_DIR}/ble_watchdog.py
+ExecStartPre=/usr/bin/test -x __WATCHDOG_DIR__/venv/bin/python
+ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/ble_watchdog.py
+
 ExecStart=__WATCHDOG_DIR__/venv/bin/python ble_watchdog.py
 
 Restart=always
 RestartSec=10s
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 Environment=PYTHONUNBUFFERED=1
 
