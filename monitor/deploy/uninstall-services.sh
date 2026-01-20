@@ -20,6 +20,8 @@ rm -f \
   "$SERVICE_DIR/watchdog-monitor.service" \
   "$SERVICE_DIR/watchdog-dashboard.service"
 
+systemctl disable --now watchdog-bt-unblock.service || true
+rm -f /etc/systemd/system/watchdog-bt-unblock.service || true
 systemctl daemon-reload
 
 echo "🗑️  Watchdog services removed"

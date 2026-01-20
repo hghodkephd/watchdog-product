@@ -24,6 +24,50 @@ WATCHDOG_GROUP="$(id -gn "$WATCHDOG_USER")"
 
 SERVICE_DIR="/etc/systemd/system"
 
+echo "[Watchdog] Ensuring Bluetooth is installed, enabled, and unblocked..."
+
+# Ensure tools exist (safe even if already installed)
+apt-get update -y
+apt-get install -y bluetooth bluez rfkill
+
+# Enable bluetooth daemon now + on boot
+systemctl enable bluetooth --now || true
+
+# Unblock at kernel level (softblock)
+rfkill unblock bluetooth || true
+rfkill unblock all || true
+
+# Restart to apply cleanly
+systemctl restart bluetooth || true
+sleep 2
+
+echo "[Watchdog] rfkill status:"
+rfkill list || true
+
+
+echo "[Watchdog] Installing watchdog-bt-unblock.service..."
+
+cat >/etc/systemd/system/watchdog-bt-unblock.service <<'EOF'
+[Unit]
+Description=Watchdog: ensure Bluetooth is unblocked at boot
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock bluetooth
+ExecStart=/usr/sbin/rfkill unblock all
+ExecStart=/bin/systemctl restart bluetooth
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable watchdog-bt-unblock.service
+systemctl start watchdog-bt-unblock.service || true
+
 echo "Installing Watchdog systemd services..."
 
 # Bake correct paths + user/group into systemd units
