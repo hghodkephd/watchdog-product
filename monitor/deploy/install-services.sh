@@ -19,8 +19,6 @@ SERVICE_DIR="/etc/systemd/system"
 
 echo "Installing Watchdog systemd services..."
 
-mkdir -p "$WATCHDOG_DIR"
-
 # Bake correct paths + user/group into systemd units
 sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
     -e "s|__WATCHDOG_USER__|$WATCHDOG_USER|g" \
