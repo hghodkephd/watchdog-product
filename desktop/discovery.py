@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Network discovery for Watchdog devices - optimized for speed."""
 
-import socket
 import subprocess
 import sys
 import urllib.request
