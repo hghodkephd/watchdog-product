@@ -8,6 +8,8 @@ Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
 WorkingDirectory=__WATCHDOG_DIR__
+ExecStartPre=/usr/bin/test -x ${WATCHDOG_DIR}/venv/bin/python
+ExecStartPre=/usr/bin/test -f ${WATCHDOG_DIR}/ble_watchdog.py
 ExecStart=__WATCHDOG_DIR__/venv/bin/python ble_watchdog.py
 
 Restart=always

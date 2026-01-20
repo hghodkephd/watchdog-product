@@ -8,6 +8,8 @@ Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
 WorkingDirectory=__WATCHDOG_DIR__
+ExecStartPre=/usr/bin/test -x ${WATCHDOG_DIR}/venv/bin/streamlit
+ExecStartPre=/usr/bin/test -f ${WATCHDOG_DIR}/app.py
 ExecStart=__WATCHDOG_DIR__/venv/bin/streamlit run app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
 
 
