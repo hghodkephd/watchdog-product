@@ -40,6 +40,14 @@ _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
 
 
+MAX_RESTARTS = 10
+BACKOFF_BASE_SEC = 2.0           # seconds
+BACKOFF_MAX_SEC = 120.0          # cap backoff (2 min)
+HEALTHY_RESET_SEC = 120.0        # reset restart counter after 2 min healthy
+
+_restart_attempts = 0
+_last_healthy_ts = None
+
 class WatchdogMonitor:
     """
     Production BLE monitor with self-healing capabilities.
@@ -200,6 +208,7 @@ class WatchdogMonitor:
             _log_core.info("Watchdog thread started")
         
         restart_count = 0
+        backoff_sec = BACKOFF_BASE_SEC
         
         try:
             while self.running:
@@ -218,10 +227,30 @@ class WatchdogMonitor:
                     time.sleep(1)
                 
                 if self.restart_requested and self.running:
-                    _log_ble.warning("Restarting scanner due to watchdog trigger")
-                    stop_scanner()
-                    time.sleep(2)  # Brief pause before restart
                     restart_count += 1
+                    if restart_count > MAX_RESTARTS:
+                        _log_ble.error(
+                            "Max restarts exceeded (%d). Disabling monitor to avoid a CPU spin. "
+                            "Check Bluetooth health (rfkill / adapter).",
+                            MAX_RESTARTS,
+                        )
+                        self.running = False
+                        break
+    
+                    _log_ble.warning(
+                        "Restarting scanner due to watchdog trigger (attempt %d/%d). Backoff=%ss",
+                        restart_count,
+                        MAX_RESTARTS,
+                        backoff_sec,
+                    )
+    
+                    try:
+                        stop_scanner()
+                    except Exception:
+                        _log_ble.exception("Error stopping scanner during restart")
+    
+                    time.sleep(backoff_sec)
+                    backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
                     
         except KeyboardInterrupt:
             _log_core.info("Keyboard interrupt received")
