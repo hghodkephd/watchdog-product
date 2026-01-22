@@ -54,13 +54,53 @@ def is_process_running(pid: Optional[int]) -> bool:
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
+def _cleanup_dead_log_handles() -> None:
+    """
+    Close and remove any cached stdout/stderr log file handles
+    for monitor processes that are no longer alive.
 
+    This prevents file handle leaks if the monitor process is killed
+    externally (OOM, SIGKILL, crash) and our normal stop path isn't hit.
+    """
+    dead_pids: list[int] = []
+
+    for pid, handles in list(_PROCESS_LOG_HANDLES.items()):
+        try:
+            if not psutil.pid_exists(pid):
+                dead_pids.append(pid)
+                continue
+
+            p = psutil.Process(pid)
+
+            # If PID got reused by some other process, don't keep handles
+            cmdline = " ".join(p.cmdline())
+            if "ble_watchdog" not in cmdline:
+                dead_pids.append(pid)
+                continue
+
+            if not p.is_running():
+                dead_pids.append(pid)
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            dead_pids.append(pid)
+
+    for pid in dead_pids:
+        handles = _PROCESS_LOG_HANDLES.pop(pid, None)
+        if not handles:
+            continue
+        for h in handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+            
 def start_monitoring_process() -> Optional[int]:
     """
     Start the BLE monitoring service as a background process.
     Returns the process ID (PID) if successful, None otherwise.
     """
     ble_script = get_ble_core_script()
+    _cleanup_dead_log_handles()
     
     if not ble_script.exists():
         raise FileNotFoundError(f"BLE core script not found at {ble_script}")
@@ -221,6 +261,7 @@ def get_monitoring_status() -> dict:
     Returns dict with status info.
     """
     cfg = load_config()
+    _cleanup_dead_log_handles()
     
     pid = cfg.monitoring.process_pid if hasattr(cfg.monitoring, 'process_pid') else None
     is_running = is_process_running(pid)
