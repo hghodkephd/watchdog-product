@@ -10,17 +10,16 @@ This module wraps the validated OSS BLE scanner and adds production features:
 - Data persistence to SQLite
 """
 
+import sys
 import threading
 import time
 import signal
-import sys
+import os
 
 from typing import Optional
 from logging_config import get_logger
 
 # Import the validated OSS scanner components
-import sys
-import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from ble_scanner import (
@@ -29,7 +28,8 @@ from ble_scanner import (
     get_readings,
     clear_readings,
     start_scanner_thread,
-    stop_scanner
+    stop_scanner,
+    check_ble_adapter_sync,
 )
 
 from config import AppConfig, load_config
@@ -38,6 +38,10 @@ from storage import Reading, DatabaseWriter, get_db_path
 _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
+
+# Maximum retries for BLE adapter initialization
+BLE_ADAPTER_MAX_RETRIES = 10
+BLE_ADAPTER_RETRY_DELAY_BASE = 5  # seconds, will use exponential backoff
 
 
 class WatchdogMonitor:
@@ -58,7 +62,7 @@ class WatchdogMonitor:
         self.running = False
         self.restart_requested = False
         self.last_data_time = time.time()
-        self._shutdown_event = threading.Event()  # Explicit shutdown signal for main thread
+        self._shutdown_reason = None  # Track why we're shutting down
         
     def _database_callback(self, reading: SensorReading):
         """
@@ -118,6 +122,45 @@ class WatchdogMonitor:
         except Exception as e:
             # Archive failure should NOT prevent monitoring from starting
             _log_core.error("Archive error (non-fatal): %s", e)
+
+    def _wait_for_ble_adapter(self) -> bool:
+        """
+        Wait for BLE adapter to become available with exponential backoff.
+        
+        Returns:
+            True if adapter is available, False if max retries exceeded
+        """
+        for attempt in range(BLE_ADAPTER_MAX_RETRIES):
+            _log_ble.info("Checking BLE adapter (attempt %d/%d)...", 
+                         attempt + 1, BLE_ADAPTER_MAX_RETRIES)
+            
+            status = check_ble_adapter_sync()
+            
+            if status.get('available', False):
+                _log_ble.info("BLE adapter available")
+                return True
+            
+            error_msg = status.get('error', 'Unknown error')
+            error_type = status.get('error_type', 'unknown')
+            
+            _log_ble.warning("BLE adapter not available: %s (type: %s)", 
+                            error_msg, error_type)
+            
+            if attempt < BLE_ADAPTER_MAX_RETRIES - 1:
+                # Exponential backoff: 5, 10, 20, 40... capped at 60 seconds
+                delay = min(BLE_ADAPTER_RETRY_DELAY_BASE * (2 ** attempt), 60)
+                _log_ble.info("Retrying in %d seconds...", delay)
+                
+                # Check for shutdown during wait
+                for _ in range(int(delay)):
+                    if not self.running:
+                        _log_ble.info("Shutdown requested during BLE adapter wait")
+                        return False
+                    time.sleep(1)
+        
+        _log_ble.error("BLE adapter not available after %d attempts", 
+                      BLE_ADAPTER_MAX_RETRIES)
+        return False
     
     def _watchdog_thread_func(self):
         """
@@ -126,7 +169,7 @@ class WatchdogMonitor:
         Monitors data flow and triggers scanner restart if stalled.
         Also handles periodic archiving.
         """
-        _log_core.info("Starting watchdog monitoring thread")
+        _log_core.info("Watchdog thread started")
         
         # Track time for periodic tasks
         last_archive_time = time.time()
@@ -159,7 +202,7 @@ class WatchdogMonitor:
                     current_readings = get_readings()
                     num_sensors = len(current_readings)
                     if num_sensors > 0:
-                        _log_core.info(
+                        _log_core.debug(
                             "Healthy - %d sensor(s), last data %.1fs ago",
                             num_sensors,
                             time_since_last_data,
@@ -171,31 +214,54 @@ class WatchdogMonitor:
                 if (now - last_archive_time) > ARCHIVE_INTERVAL:
                     self._run_archive("periodic")
                     last_archive_time = now
+        
+        _log_core.info("Watchdog thread exiting (self.running=%s)", self.running)
     
     def start(self):
         """Start the monitoring system with watchdog."""
+        _log_core.info("=" * 60)
         _log_core.info("Starting Watchdog Environmental Monitor")
+        _log_core.info("PID: %d", os.getpid())
+        _log_core.info("=" * 60)
+        
+        # Also print to stderr for immediate visibility in journalctl
+        print(f"[watchdog] Starting - PID {os.getpid()}", file=sys.stderr, flush=True)
         
         # Start thread-safe DB writer (owns the SQLite connection)
         self.db_writer = DatabaseWriter(get_db_path())
         self.db_writer.start()
         _log_core.info("Database writer started")
 
-        # Register signal handlers
+        # Register signal handlers BEFORE setting self.running = True
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        _log_core.info("Signal handlers registered")
 
         # === Auto-archive on startup ===
         if self.cfg.archive.enabled and self.cfg.archive.auto_archive:
             self._run_archive("startup")
 
         self.running = True
+        self._shutdown_reason = None
+        
+        # Wait for BLE adapter before starting scanner
+        if not self._wait_for_ble_adapter():
+            if not self.running:
+                # Shutdown was requested during adapter wait
+                _log_core.info("Shutdown requested before BLE adapter ready")
+                self._shutdown_reason = "shutdown_during_ble_wait"
+                self.stop()
+                return
+            else:
+                # Adapter never became available - keep trying in main loop
+                _log_core.warning("BLE adapter not ready, will retry in main loop")
         
         # Start watchdog thread
         if self.cfg.monitoring.watchdog_enabled:
             self.watchdog_thread = threading.Thread(
                 target=self._watchdog_thread_func,
-                daemon=True
+                daemon=True,
+                name="WatchdogThread"
             )
             self.watchdog_thread.start()
             _log_core.info("Watchdog thread started")
@@ -203,36 +269,67 @@ class WatchdogMonitor:
         restart_count = 0
         
         try:
+            _log_core.info("Entering main monitoring loop")
+            print("[watchdog] Entering main loop", file=sys.stderr, flush=True)
+            
             while self.running:
                 # Start OSS scanner with database callback
                 _log_ble.info("Starting BLE scanner (restart #%d)...", restart_count)
                 
-                # Use validated OSS scanner with our callback
-                self.scanner_thread = start_scanner_thread(
-                    callback=self._database_callback
-                )
+                try:
+                    # Use validated OSS scanner with our callback
+                    self.scanner_thread = start_scanner_thread(
+                        callback=self._database_callback
+                    )
+                except Exception as e:
+                    _log_ble.error("Failed to start scanner: %s", e)
+                    # Wait before retry
+                    for _ in range(10):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+                    restart_count += 1
+                    continue
                 
                 self.restart_requested = False
                 
-                # FIXED: Block on event instead of fragile sleep loop
-                # This ensures main thread stays alive until explicit shutdown
+                # Monitor for restart requests - THIS IS THE MAIN BLOCKING LOOP
+                _log_core.debug("Scanner started, entering monitoring loop")
                 while self.running and not self.restart_requested:
-                    # Wait for shutdown signal or timeout (allows periodic checks)
-                    if self._shutdown_event.wait(timeout=1.0):
-                        # Shutdown event was set
-                        break
+                    time.sleep(1)
+                
+                # Log why we exited the inner loop
+                _log_core.info(
+                    "Inner loop exited: running=%s, restart_requested=%s",
+                    self.running, self.restart_requested
+                )
                 
                 if self.restart_requested and self.running:
                     _log_ble.warning("Restarting scanner due to watchdog trigger")
                     stop_scanner()
                     time.sleep(2)  # Brief pause before restart
                     restart_count += 1
+            
+            # Log why we exited the outer loop
+            _log_core.info("Main loop exited: running=%s", self.running)
+            self._shutdown_reason = self._shutdown_reason or "running_set_false"
                     
         except KeyboardInterrupt:
             _log_core.info("Keyboard interrupt received")
-        except Exception:
-            _log_core.exception("FATAL ERROR")
+            self._shutdown_reason = "keyboard_interrupt"
+        except Exception as e:
+            _log_core.exception("FATAL ERROR in main loop")
+            self._shutdown_reason = f"exception: {e}"
         finally:
+            _log_core.info(
+                "start() completing - reason: %s", 
+                self._shutdown_reason or "unknown"
+            )
+            print(
+                f"[watchdog] start() exiting - reason: {self._shutdown_reason}", 
+                file=sys.stderr, 
+                flush=True
+            )
             self.stop()
     
     def _signal_handler(self, signum, frame):
@@ -241,17 +338,23 @@ class WatchdogMonitor:
             signal_name = signal.Signals(signum).name
         except (ValueError, AttributeError):
             signal_name = str(signum)
-    
+        
+        # CRITICAL: Print immediately to stderr so we see this in journalctl
+        # even if the process exits before log buffers flush
+        msg = f"[watchdog] Received {signal_name} (signum={signum}), initiating shutdown..."
+        print(msg, file=sys.stderr, flush=True)
+        
         _log_core.warning("Received %s, initiating graceful shutdown...", signal_name)
+        
+        self._shutdown_reason = f"signal_{signal_name}"
         self.running = False
-        self._shutdown_event.set()  # Wake up main thread
         
     def stop(self):
         """Stop monitoring and cleanup (idempotent; safe for SIGTERM/SIGINT)."""
         _log_core.info("Stopping Watchdog Monitor")
+        print("[watchdog] stop() called", file=sys.stderr, flush=True)
         
         self.running = False
-        self._shutdown_event.set()  # Ensure main thread wakes up
         
         # Stop OSS scanner (thread-safe stop event)
         try:
@@ -270,7 +373,7 @@ class WatchdogMonitor:
         except Exception:
             _log_core.exception("Error stopping database writer")
     
-        # Close DB connection (legacy compatibility)
+        # Close DB connection (legacy path)
         try:
             if getattr(self, "conn", None):
                 self.conn.close()
@@ -279,17 +382,25 @@ class WatchdogMonitor:
             _log_core.exception("Error closing database connection")
         
         _log_core.info("Shutdown complete")
+        print("[watchdog] Shutdown complete", file=sys.stderr, flush=True)
 
 
 def main():
     """Entry point for running as standalone service."""
+    # Ensure unbuffered output for systemd journal
+    print(f"[watchdog] main() starting - PID {os.getpid()}", file=sys.stderr, flush=True)
+    
     monitor = WatchdogMonitor()
     try:
         monitor.start()
     except KeyboardInterrupt:
         _log_core.info("Stopped by user")
     except Exception:
-        _log_core.exception("Fatal error")
+        _log_core.exception("Fatal error in main()")
+        print("[watchdog] Fatal error in main()", file=sys.stderr, flush=True)
+        raise
+    finally:
+        print("[watchdog] main() exiting", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
