@@ -405,3 +405,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+    _log_core.error("MAIN FUNCTION EXITED — THIS SHOULD NEVER HAPPEN")
+    
+    
+    
+    
+    
+    
