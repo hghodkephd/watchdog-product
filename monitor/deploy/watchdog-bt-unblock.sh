@@ -7,5 +7,12 @@ rfkill unblock bluetooth || true
 # Restart bluetooth service to apply cleanly
 systemctl restart bluetooth || true
 
-# Small delay can help the stack settle on some Pi images
+# Small delay for stack to settle
+sleep 2
+
+# Power on the adapter (this was missing!)
+bluetoothctl power on || true
+
+# Verify
 sleep 1
+bluetoothctl show | grep -E "Powered|PowerState" || true
