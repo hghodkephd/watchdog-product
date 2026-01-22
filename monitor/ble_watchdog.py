@@ -359,10 +359,22 @@ def main():
     monitor = WatchdogMonitor()
     try:
         monitor.start()
+
+        # Keep the process alive for systemd.
+        # The signal handler / stop() will set monitor.running = False.
+        while monitor.running:
+            time.sleep(1)
+
     except KeyboardInterrupt:
         _log_core.info("Stopped by user")
     except Exception:
         _log_core.exception("Fatal error")
+    finally:
+        # Ensure cleanup even on unexpected exit paths
+        try:
+            monitor.stop()
+        except Exception:
+            _log_core.exception("Error during shutdown")
 
 
 if __name__ == "__main__":
