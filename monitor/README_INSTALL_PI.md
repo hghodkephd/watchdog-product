@@ -1,115 +1,150 @@
-# Watchdog – Raspberry Pi Installation Guide
+# Watchdog — Raspberry Pi Installation Guide
 
-This document describes how to install and run the Watchdog monitoring
-system on a Raspberry Pi using systemd services.
+This document describes a **clean, known-good installation** of Watchdog on a Raspberry Pi,
+based on a full reinstall and end-to-end validation of system behavior.
 
-This guide is intended for development and controlled deployments.
-It assumes comfort with the command line and system administration.
+If you follow this guide and see the expected outputs, **your system is working correctly**.
 
 ---
 
 ## Supported Platform
 
-- Raspberry Pi OS (Lite or Desktop)
+- Raspberry Pi Zero 2 W / Pi 4
+- Raspberry Pi OS (Debian trixie / bookworm)
 - Python 3.9+
 - systemd
-- Bluetooth enabled
-- Network access (WiFi or Ethernet)
-- mDNS / Avahi (for watchdog.local discovery)
 
 ---
 
-## Directory Layout (on Pi)
+## 1. System Preparation
 
-Watchdog Product
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y git sqlite3 bluetooth bluez avahi-daemon
+```
 
-This repository contains the Watchdog environmental monitoring system, composed of two primary components:
+---
 
-monitor/ – Raspberry Pi–based monitoring system (BLE scanning + SQLite + Streamlit dashboard)
+## 2. Clone Repository
 
-desktop/ – Desktop launcher app for discovering and connecting to a Watchdog device on the local network
+```bash
+cd ~
+git clone https://github.com/hghodkephd/watchdog-product.git Watchdog
+cd Watchdog
+```
 
-This repository is intended for development, controlled deployments, and early productization. It assumes comfort with Python, Linux, and basic system administration.
+---
 
-Repository Layout
+## 3. Python Environment
 
-watchdog-product/
-├── monitor/        # Raspberry Pi monitor + dashboard
-├── desktop/        # Desktop launcher application
-├── CODE-FIXES.md   # Engineering notes / known fixes
-├── MERGE-TASK-LIST.md
-└── README.md       # (this file)
+```bash
+python3 -m venv monitor/venv
+source monitor/venv/bin/activate
+pip install --upgrade pip
+pip install -r monitor/requirements.txt
+```
 
-Quick Start Overview
+---
 
-Choose one of the following paths depending on what you are working on:
+## 4. Bluetooth Power (CRITICAL)
 
-Raspberry Pi installation: see monitor/README_INSTALL_PI.md
+```bash
+sudo bash deploy/watchdog-bt-unblock.sh
+bluetoothctl show
+```
 
-Desktop launcher (local dev): see desktop/README.md
+Expected:
+```
+Powered: yes
+```
 
-This top-level README intentionally does not duplicate detailed setup instructions.
+---
 
-Components
+## 5. Install Services
 
-Monitor (Raspberry Pi)
+```bash
+cd monitor/deploy
+sudo ./install_services.sh
+sudo systemctl daemon-reload
+sudo systemctl enable watchdog-monitor watchdog-dashboard
+```
 
-The monitor component runs on a Raspberry Pi and is responsible for:
+---
 
-BLE scanning of environmental sensors
+## 6. Start Services
 
-Local data persistence (SQLite)
+```bash
+sudo systemctl start watchdog-monitor
+sudo systemctl start watchdog-dashboard
+```
 
-Running a Streamlit-based web dashboard
+---
 
-Exposing the dashboard on port 8501
+## 7. systemd Behavior (Important)
 
-The monitor runs as two systemd services:
+Seeing this is **normal**:
 
-watchdog-monitor.service – BLE scanning + data ingestion
+```
+Active: inactive (dead)
+status=0/SUCCESS
+```
 
-watchdog-dashboard.service – Web dashboard
+This indicates a clean exit, not a crash.
 
-All paths, users, and groups are resolved dynamically at install time. No hard-coded /home/pi assumptions are required.
+---
 
-➡ Installation instructions: monitor/README_INSTALL_PI.md
+## 8. Validate Monitor
 
-Desktop Launcher
+```bash
+journalctl -u watchdog-monitor -n 50 --no-pager
+```
 
-The desktop component is a lightweight launcher application that:
+Look for:
+```
+Entering main loop
+```
 
-Discovers Watchdog devices on the local network (mDNS + fallback methods)
+---
 
-Verifies connectivity via HTTP to the dashboard
+## 9. Dashboard
 
-Launches the dashboard UI in a desktop webview
+Open:
+```
+http://<pi-ip>:8501
+```
 
-This component is designed to be user-facing but is still under active development.
+Safari may require refresh once.
 
-➡ Desktop setup: desktop/README.md
+---
 
-Development Notes
+## 10. Validate Database
 
-Systemd services include sanity checks for executable paths
+```bash
+sqlite3 ~/Watchdog/monitor/data/data.sqlite3 ".schema readings"
+sqlite3 ~/Watchdog/monitor/data/data.sqlite3 "SELECT COUNT(*) FROM readings;"
+```
 
-Services are user-level (non-root) and restart automatically
+---
 
-HTTP-based verification is preferred over raw socket checks to avoid false positives
+## 11. 5-Minute Health Check
 
-Build artifacts, runtime data, and generated files are excluded via .gitignore
+```bash
+python - << 'EOF'
+import sqlite3, time
+from pathlib import Path
+db = Path.home() / "Watchdog/monitor/data/data.sqlite3"
+conn = sqlite3.connect(db)
+count = conn.execute(
+    "SELECT COUNT(*) FROM readings WHERE ts > ?",
+    (time.time() - 300,)
+).fetchone()[0]
+print(f"Readings in last 5 minutes: {count}")
+EOF
+```
 
-Status
+---
 
-This repository reflects a merge baseline for the Watchdog product:
+## Installation Complete
 
-Core monitor and desktop codebases merged
-
-Path- and user-independent systemd deployment
-
-Known failure modes addressed prior to SD card re-imaging
-
-Further hardening, packaging, and documentation will follow after validation on a fresh Raspberry Pi SD card.
-
-License
-
-Private / internal use only. Not open source.
+If all steps succeed, Watchdog is correctly installed and operating.
