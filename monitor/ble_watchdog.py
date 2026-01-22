@@ -218,17 +218,42 @@ class WatchdogMonitor:
         restart_count = 0
         backoff_sec = BACKOFF_BASE_SEC
         last_restart_ts = 0.0  # when we last performed a restart/backoff
+
         try:
             while self.running:
                 # Start OSS scanner with database callback
                 _log_ble.info("Starting BLE scanner (restart #%d)...", restart_count)
-                
-                # Use validated OSS scanner with our callback
-                self.scanner_thread = start_scanner_thread(
-                    callback=self._database_callback
-                )
-                
+
+                try:
+                    # Use validated OSS scanner with our callback
+                    self.scanner_thread = start_scanner_thread(
+                        callback=self._database_callback
+                    )
+                except Exception as e:
+                    restart_count += 1
+                    _log_ble.exception(
+                        "BLE scanner failed to start (attempt %d/%d): %s",
+                        restart_count,
+                        MAX_RESTARTS,
+                        e,
+                    )
+                    if restart_count >= MAX_RESTARTS:
+                        _log_core.error(
+                            "Max restart attempts reached (%d). Giving up.",
+                            MAX_RESTARTS,
+                        )
+                        self.running = False
+                        break
+
+                    _log_ble.warning("Retrying start in %.1fs", backoff_sec)
+                    time.sleep(backoff_sec)
+                    backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
+                    continue
+
+                # Successful start: reset backoff
+                backoff_sec = BACKOFF_BASE_SEC
                 self.restart_requested = False
+                
                 threshold = self.cfg.monitoring.stall_threshold_sec
                 # Monitor for restart requests
                                 # Monitor for restart requests
