@@ -23,6 +23,14 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
+
+def _handle_sigterm(signum, frame):
+    _log_ble.warning("Received SIGTERM from systemd, exiting immediately")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
+signal.signal(signal.SIGINT, _handle_sigterm)
+
 from ble_scanner import (
     decode_govee,
     SensorReading,
@@ -265,7 +273,8 @@ class WatchdogMonitor:
                     except Exception:
                         _log_ble.exception("Error stopping scanner during restart")
                     last_restart_ts = time.time()
-                    time.sleep(backoff_sec)
+                    for _ in range(int(backoff_sec)):
+                        time.sleep(1)
                     backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
                     
         except KeyboardInterrupt:
