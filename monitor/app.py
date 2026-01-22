@@ -9,10 +9,12 @@ import altair as alt
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import subprocess
+import shutil
 
 # Watchdog imports
 from config import load_config, save_config, SensorConfig, WeatherConfig, US_TIMEZONES
-from storage import get_connection, init_db, get_db_stats, archive_old_data, list_archives
+from storage import get_connection, init_db, get_db_stats, archive_old_data, list_archives, get_db_path
 from alerts import check_alerts, format_alert_display
 from weather_api import geocode_zip, fetch_current_weather, fetch_weather_series
 from process_manager import start_monitoring, stop_monitoring, get_monitoring_status
@@ -82,6 +84,85 @@ def cached_weather_series(
     result = fetch_weather_series(lat, lon, start, end)
     return result if result is not None else pd.DataFrame()
 
+# ---------------------------------------------------------------------
+# System health (reassurance panel)
+# ---------------------------------------------------------------------
+
+@st.cache_data(ttl=10)
+def get_system_health(window_s: int = 300) -> dict:
+    """
+    Lightweight health signals for user reassurance.
+    Authoritative signal is DB freshness (not BLE internals).
+    Cached to avoid expensive calls on every Streamlit rerun.
+    """
+    health = {
+        "db_ok": False,
+        "db_path": None,
+        "last_reading_ts": None,
+        "last_reading_age_s": None,
+        "distinct_sensors_window": 0,
+        "disk_free_gb": None,
+        "bluetooth_powered": None,   # True/False/None
+        "bluetooth_error": None,
+        "now": time.time(),
+    }
+
+    # DB checks (authoritative)
+    try:
+        db_path = get_db_path()
+        health["db_path"] = str(db_path)
+
+        conn = get_connection()
+        try:
+            row = conn.execute("SELECT MAX(ts) FROM readings;").fetchone()
+            last_ts = float(row[0]) if row and row[0] is not None else None
+            health["last_reading_ts"] = last_ts
+            if last_ts is not None:
+                health["last_reading_age_s"] = max(0.0, health["now"] - last_ts)
+
+            cutoff = health["now"] - float(window_s)
+            row2 = conn.execute(
+                "SELECT COUNT(DISTINCT sensor_id) FROM readings WHERE ts > ?;",
+                (cutoff,),
+            ).fetchone()
+            health["distinct_sensors_window"] = int(row2[0]) if row2 and row2[0] is not None else 0
+
+            health["db_ok"] = True
+        finally:
+            conn.close()
+    except Exception:
+        # Keep health["db_ok"] False; UI will show red.
+        pass
+
+    # Disk free (nice reassurance)
+    try:
+        if health["db_path"]:
+            usage = shutil.disk_usage(str(get_db_path().parent))
+            health["disk_free_gb"] = round(usage.free / (1024**3), 1)
+    except Exception:
+        pass
+
+    # Bluetooth powered state (best-effort reassurance)
+    try:
+        p = subprocess.run(
+            ["bluetoothctl", "show"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if p.returncode == 0:
+            powered = None
+            for line in p.stdout.splitlines():
+                if "Powered:" in line:
+                    powered = line.split("Powered:", 1)[1].strip().lower() == "yes"
+                    break
+            health["bluetooth_powered"] = powered
+        else:
+            health["bluetooth_error"] = (p.stderr or "").strip()[:200] or "bluetoothctl failed"
+    except Exception as e:
+        health["bluetooth_error"] = str(e)[:200]
+
+    return health
 
 # ---------------------------------------------------------------------
 # Header
@@ -99,6 +180,55 @@ tab1, tab2, tab3 = st.tabs(["📊 Monitoring", "⚙️ Setup", "🔧 Settings"])
 with tab1:
     # Check monitoring status
     status = get_monitoring_status()
+    
+        # --------------------
+    # System Health panel
+    # --------------------
+    health = get_system_health(window_s=300)
+
+    # Compute simple status lights
+    is_running = bool(status.get("is_running", False))
+    age = health.get("last_reading_age_s", None)
+    sensors_5m = int(health.get("distinct_sensors_window", 0) or 0)
+
+    # Freshness thresholds (tune later)
+    if (age is None) or (not health.get("db_ok", False)):
+        freshness_light = "🔴"
+        freshness_text = "No readings yet"
+    elif age <= 120:
+        freshness_light = "🟢"
+        freshness_text = f"{int(age)}s ago"
+    elif age <= 600:
+        freshness_light = "🟡"
+        freshness_text = f"{int(age)}s ago"
+    else:
+        freshness_light = "🔴"
+        freshness_text = f"{int(age)}s ago"
+
+    run_light = "🟢" if is_running else "🔴"
+    bt = health.get("bluetooth_powered", None)
+    bt_light = "🟢" if bt is True else ("🔴" if bt is False else "🟡")
+    bt_text = "Powered" if bt is True else ("Off" if bt is False else "Unknown")
+
+    st.markdown("### 🩺 System Health")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Monitor service", f"{run_light} {'Running' if is_running else 'Stopped'}")
+    with c2:
+        st.metric("Bluetooth", f"{bt_light} {bt_text}")
+    with c3:
+        st.metric("Sensors (last 5m)", f"{'🟢' if sensors_5m > 0 else '🔴'} {sensors_5m}")
+    with c4:
+        db_ok = bool(health.get("db_ok", False))
+        st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
+
+    # Optional: compact “what to do” hints only when red
+    if not is_running:
+        st.info("Monitor is stopped. Use **Start monitoring** below.")
+    if bt is False:
+        st.warning("Bluetooth is OFF. Run: `sudo bash ~/Watchdog/deploy/watchdog-bt-unblock.sh`")
+    if db_ok is False:
+        st.warning("Database check failed. Verify `~/Watchdog/monitor/data/data.sqlite3` exists and permissions are correct.")
     
     # If a monitor process is already running when the UI starts, require explicit user acknowledgement.
     # This prevents "autostart" confusion caused by stale processes from previous sessions.
