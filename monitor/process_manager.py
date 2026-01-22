@@ -265,7 +265,23 @@ def get_monitoring_status() -> dict:
     
     pid = cfg.monitoring.process_pid if hasattr(cfg.monitoring, 'process_pid') else None
     is_running = is_process_running(pid)
-    
+    # --- CLEANUP: close leaked log handles for dead processes ---
+    dead_pids = []
+    for tracked_pid, handles in _PROCESS_LOG_HANDLES.items():
+        if not is_process_running(tracked_pid):
+            dead_pids.append(tracked_pid)
+
+    for dead_pid in dead_pids:
+        handles = _PROCESS_LOG_HANDLES.pop(dead_pid, None)
+        if handles:
+            for h in handles:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+            _log_process.warning(
+                "Cleaned up leaked log handles for dead PID %s", dead_pid
+            )
     status = {
         "is_running": is_running,
         "pid": pid,
