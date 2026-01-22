@@ -14,7 +14,8 @@ from typing import Optional
 
 import pandas as pd
 import requests
-
+import json
+from pathlib import Path
 
 # ---------------------------------------------------------------------
 # Simple container for a geo point with timezone
@@ -26,6 +27,42 @@ class WeatherPoint:
     longitude: float
     label: str          # e.g. "Hopkinton, Massachusetts, United States"
     timezone: str       # IANA timezone, e.g. "America/New_York"
+
+
+ 
+ # ---------------------------------------------------------------------
+ # Simple geocode cache (ZIP -> lat/lon/tz/label)
+ # ---------------------------------------------------------------------
+ 
+ _GEOCODE_CACHE_PATH = (
+     __import__("pathlib").Path.home() / "Watchdog" / "monitor" / "data" / "geocode_cache.json"
+ )
+ 
+ 
+ def _load_geocode_cache() -> Dict[str, Dict[str, Any]]:
+     """Best-effort load of geocode cache; returns {} if missing/corrupt."""
+     try:
+         if not _GEOCODE_CACHE_PATH.exists():
+             return {}
+         with open(_GEOCODE_CACHE_PATH, "r", encoding="utf-8") as f:
+             data = json.load(f)
+         return data if isinstance(data, dict) else {}
+     except Exception:
+         return {}
+ 
+ 
+ def _save_geocode_cache(cache: Dict[str, Dict[str, Any]]) -> None:
+     """Best-effort atomic save of geocode cache."""
+     try:
+         _GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+         tmp = _GEOCODE_CACHE_PATH.with_suffix(".tmp")
+         with open(tmp, "w", encoding="utf-8") as f:
+             json.dump(cache, f, indent=2, sort_keys=True)
+         tmp.replace(_GEOCODE_CACHE_PATH)
+     except Exception:
+         # Cache failures should never break core functionality
+         pass
+ 
 
 
 # ---------------------------------------------------------------------
@@ -94,6 +131,22 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
         raise ValueError("Empty ZIP code")
 
     base_url = "https://geocoding-api.open-meteo.com/v1/search"
+    
+     # Cache lookup first (stable mapping; no TTL needed)
+     cache_key = f"{country_code}:{z}"
+     cache = _load_geocode_cache()
+     cached = cache.get(cache_key)
+     if isinstance(cached, dict):
+         try:
+             return WeatherPoint(
+                 latitude=float(cached["latitude"]),
+                 longitude=float(cached["longitude"]),
+                 label=str(cached.get("label", f"{z}, {country_code}")),
+                 timezone=str(cached.get("timezone", "America/New_York")),
+             )
+         except Exception:
+             # Corrupt entry; fall through to live lookup
+             pass
 
     # Try a couple of query variants to be robust
     query_variants = [z, f"{z}, {country_code}"]
@@ -132,6 +185,15 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
             r0.get("country"),
         ]
         label = ", ".join(p for p in label_parts if p)
+
+         # Save to cache (best-effort)
+         cache[cache_key] = {
+             "latitude": lat,
+             "longitude": lon,
+             "timezone": timezone,
+             "label": label,
+         }
+         _save_geocode_cache(cache)
 
         return WeatherPoint(
             latitude=lat, 
@@ -255,7 +317,35 @@ def fetch_weather_series(
     except Exception:
         return None
 
+def _load_cached_geocode():
+    try:
+        if not GEOCODE_CACHE_FILE.exists():
+            return None
 
+        with open(GEOCODE_CACHE_FILE, "r") as f:
+            data = json.load(f)
+
+        ts = data.get("timestamp")
+        if not ts or (time.time() - ts) > GEOCODE_CACHE_TTL:
+            return None
+
+        return data.get("lat"), data.get("lon")
+    except Exception:
+        return None
+
+
+def _save_geocode_cache(lat: float, lon: float):
+    try:
+        payload = {
+            "lat": lat,
+            "lon": lon,
+            "timestamp": time.time(),
+        }
+        with open(GEOCODE_CACHE_FILE, "w") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass  # cache failure should never break weather
+        
 # ---------------------------------------------------------------------
 # Small manual test helper (optional)
 # ---------------------------------------------------------------------
