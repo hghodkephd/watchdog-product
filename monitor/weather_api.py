@@ -34,34 +34,34 @@ class WeatherPoint:
  # Simple geocode cache (ZIP -> lat/lon/tz/label)
  # ---------------------------------------------------------------------
  
- _GEOCODE_CACHE_PATH = (
+_GEOCODE_CACHE_PATH = (
      __import__("pathlib").Path.home() / "Watchdog" / "monitor" / "data" / "geocode_cache.json"
  )
  
  
- def _load_geocode_cache() -> Dict[str, Dict[str, Any]]:
-     """Best-effort load of geocode cache; returns {} if missing/corrupt."""
-     try:
-         if not _GEOCODE_CACHE_PATH.exists():
-             return {}
-         with open(_GEOCODE_CACHE_PATH, "r", encoding="utf-8") as f:
-             data = json.load(f)
-         return data if isinstance(data, dict) else {}
-     except Exception:
-         return {}
+def _load_geocode_cache() -> Dict[str, Dict[str, Any]]:
+    """Best-effort load of geocode cache; returns {} if missing/corrupt."""
+    try:
+        if not _GEOCODE_CACHE_PATH.exists():
+            return {}
+        with open(_GEOCODE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
  
  
- def _save_geocode_cache(cache: Dict[str, Dict[str, Any]]) -> None:
-     """Best-effort atomic save of geocode cache."""
-     try:
-         _GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-         tmp = _GEOCODE_CACHE_PATH.with_suffix(".tmp")
-         with open(tmp, "w", encoding="utf-8") as f:
-             json.dump(cache, f, indent=2, sort_keys=True)
-         tmp.replace(_GEOCODE_CACHE_PATH)
-     except Exception:
-         # Cache failures should never break core functionality
-         pass
+def _save_geocode_cache(cache: Dict[str, Dict[str, Any]]) -> None:
+    """Best-effort atomic save of geocode cache."""
+    try:
+        _GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _GEOCODE_CACHE_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+        tmp.replace(_GEOCODE_CACHE_PATH)
+    except Exception:
+        # Cache failures should never break core functionality
+        pass
  
 
 
