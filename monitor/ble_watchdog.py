@@ -209,7 +209,7 @@ class WatchdogMonitor:
         
         restart_count = 0
         backoff_sec = BACKOFF_BASE_SEC
-        
+        last_restart_ts = 0.0  # when we last performed a restart/backoff
         try:
             while self.running:
                 # Start OSS scanner with database callback
@@ -221,9 +221,25 @@ class WatchdogMonitor:
                 )
                 
                 self.restart_requested = False
-                
+                threshold = self.cfg.monitoring.stall_threshold_sec
                 # Monitor for restart requests
+                                # Monitor for restart requests
                 while self.running and not self.restart_requested:
+                    # If we've been healthy for long enough after previous restarts,
+                    # reset counters so we don't "brick" the monitor after transient issues.
+                    if restart_count > 0:
+                        time_since_last_data = time.time() - self.last_data_time
+                        if time_since_last_data <= threshold:
+                            if last_restart_ts > 0 and (time.time() - last_restart_ts) >= HEALTHY_RESET_SEC:
+                                _log_ble.info(
+                                    "BLE healthy for >=%ss; resetting restart counters/backoff (restart_count=%d -> 0)",
+                                    HEALTHY_RESET_SEC,
+                                    restart_count,
+                                )
+                                restart_count = 0
+                                backoff_sec = BACKOFF_BASE_SEC
+                                last_restart_ts = 0.0
+
                     time.sleep(1)
                 
                 if self.restart_requested and self.running:
@@ -248,7 +264,7 @@ class WatchdogMonitor:
                         stop_scanner()
                     except Exception:
                         _log_ble.exception("Error stopping scanner during restart")
-    
+                    last_restart_ts = time.time()
                     time.sleep(backoff_sec)
                     backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
                     
