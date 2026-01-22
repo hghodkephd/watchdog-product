@@ -19,17 +19,11 @@ from typing import Optional
 from logging_config import get_logger
 
 # Import the validated OSS scanner components
-import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 
-def _handle_sigterm(signum, frame):
-    _log_ble.warning("Received SIGTERM from systemd, exiting immediately")
-    sys.exit(0)
 
-signal.signal(signal.SIGTERM, _handle_sigterm)
-signal.signal(signal.SIGINT, _handle_sigterm)
 
 from ble_scanner import (
     decode_govee,
@@ -47,6 +41,12 @@ _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
 
+def _handle_sigterm(signum, frame):
+    _log_ble.warning("Received SIGTERM from systemd, exiting immediately")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
+signal.signal(signal.SIGINT, _handle_sigterm)
 
 MAX_RESTARTS = 10
 BACKOFF_BASE_SEC = 2.0           # seconds
@@ -256,7 +256,7 @@ class WatchdogMonitor:
                 
                 threshold = self.cfg.monitoring.stall_threshold_sec
                 # Monitor for restart requests
-                                # Monitor for restart requests
+
                 while self.running and not self.restart_requested:
                     # If we've been healthy for long enough after previous restarts,
                     # reset counters so we don't "brick" the monitor after transient issues.
