@@ -19,11 +19,9 @@ from typing import Optional
 from logging_config import get_logger
 
 # Import the validated OSS scanner components
+import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
-
-
-
 
 from ble_scanner import (
     decode_govee,
@@ -41,20 +39,6 @@ _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
 
-def _handle_sigterm(signum, frame):
-    _log_ble.warning("Received SIGTERM from systemd, exiting immediately")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, _handle_sigterm)
-signal.signal(signal.SIGINT, _handle_sigterm)
-
-MAX_RESTARTS = 10
-BACKOFF_BASE_SEC = 2.0           # seconds
-BACKOFF_MAX_SEC = 120.0          # cap backoff (2 min)
-HEALTHY_RESET_SEC = 120.0        # reset restart counter after 2 min healthy
-
-_restart_attempts = 0
-_last_healthy_ts = None
 
 class WatchdogMonitor:
     """
@@ -74,6 +58,7 @@ class WatchdogMonitor:
         self.running = False
         self.restart_requested = False
         self.last_data_time = time.time()
+        self._shutdown_event = threading.Event()  # Explicit shutdown signal for main thread
         
     def _database_callback(self, reading: SensorReading):
         """
@@ -180,7 +165,7 @@ class WatchdogMonitor:
                             time_since_last_data,
                         )
             
-            # === NEW: Periodic archiving ===
+            # === Periodic archiving ===
             if self.cfg.archive.enabled and self.cfg.archive.auto_archive:
                 now = time.time()
                 if (now - last_archive_time) > ARCHIVE_INTERVAL:
@@ -216,91 +201,32 @@ class WatchdogMonitor:
             _log_core.info("Watchdog thread started")
         
         restart_count = 0
-        backoff_sec = BACKOFF_BASE_SEC
-        last_restart_ts = 0.0  # when we last performed a restart/backoff
-
+        
         try:
             while self.running:
                 # Start OSS scanner with database callback
                 _log_ble.info("Starting BLE scanner (restart #%d)...", restart_count)
-
-                try:
-                    # Use validated OSS scanner with our callback
-                    self.scanner_thread = start_scanner_thread(
-                        callback=self._database_callback
-                    )
-                except Exception as e:
-                    restart_count += 1
-                    _log_ble.exception(
-                        "BLE scanner failed to start (attempt %d/%d): %s",
-                        restart_count,
-                        MAX_RESTARTS,
-                        e,
-                    )
-                    if restart_count >= MAX_RESTARTS:
-                        _log_core.error(
-                            "Max restart attempts reached (%d). Giving up.",
-                            MAX_RESTARTS,
-                        )
-                        self.running = False
-                        break
-
-                    _log_ble.warning("Retrying start in %.1fs", backoff_sec)
-                    time.sleep(backoff_sec)
-                    backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
-                    continue
-
-                # Successful start: reset backoff
-                backoff_sec = BACKOFF_BASE_SEC
+                
+                # Use validated OSS scanner with our callback
+                self.scanner_thread = start_scanner_thread(
+                    callback=self._database_callback
+                )
+                
                 self.restart_requested = False
                 
-                threshold = self.cfg.monitoring.stall_threshold_sec
-                # Monitor for restart requests
-
+                # FIXED: Block on event instead of fragile sleep loop
+                # This ensures main thread stays alive until explicit shutdown
                 while self.running and not self.restart_requested:
-                    # If we've been healthy for long enough after previous restarts,
-                    # reset counters so we don't "brick" the monitor after transient issues.
-                    if restart_count > 0:
-                        time_since_last_data = time.time() - self.last_data_time
-                        if time_since_last_data <= threshold:
-                            if last_restart_ts > 0 and (time.time() - last_restart_ts) >= HEALTHY_RESET_SEC:
-                                _log_ble.info(
-                                    "BLE healthy for >=%ss; resetting restart counters/backoff (restart_count=%d -> 0)",
-                                    HEALTHY_RESET_SEC,
-                                    restart_count,
-                                )
-                                restart_count = 0
-                                backoff_sec = BACKOFF_BASE_SEC
-                                last_restart_ts = 0.0
-
-                    time.sleep(1)
+                    # Wait for shutdown signal or timeout (allows periodic checks)
+                    if self._shutdown_event.wait(timeout=1.0):
+                        # Shutdown event was set
+                        break
                 
                 if self.restart_requested and self.running:
+                    _log_ble.warning("Restarting scanner due to watchdog trigger")
+                    stop_scanner()
+                    time.sleep(2)  # Brief pause before restart
                     restart_count += 1
-                    if restart_count > MAX_RESTARTS:
-                        _log_ble.error(
-                            "Max restarts exceeded (%d). Disabling monitor to avoid a CPU spin. "
-                            "Check Bluetooth health (rfkill / adapter).",
-                            MAX_RESTARTS,
-                        )
-                        self.running = False
-                        break
-    
-                    _log_ble.warning(
-                        "Restarting scanner due to watchdog trigger (attempt %d/%d). Backoff=%ss",
-                        restart_count,
-                        MAX_RESTARTS,
-                        backoff_sec,
-                    )
-    
-                    try:
-                        stop_scanner()
-                    except Exception:
-                        _log_ble.exception("Error stopping scanner during restart")
-                    last_restart_ts = time.time()
-                    for _ in range(int(backoff_sec)):
-                        time.sleep(1)
-                    backoff_sec = min(backoff_sec * 2, BACKOFF_MAX_SEC)
                     
         except KeyboardInterrupt:
             _log_core.info("Keyboard interrupt received")
@@ -318,12 +244,14 @@ class WatchdogMonitor:
     
         _log_core.warning("Received %s, initiating graceful shutdown...", signal_name)
         self.running = False
+        self._shutdown_event.set()  # Wake up main thread
         
     def stop(self):
         """Stop monitoring and cleanup (idempotent; safe for SIGTERM/SIGINT)."""
         _log_core.info("Stopping Watchdog Monitor")
         
         self.running = False
+        self._shutdown_event.set()  # Ensure main thread wakes up
         
         # Stop OSS scanner (thread-safe stop event)
         try:
@@ -333,7 +261,6 @@ class WatchdogMonitor:
             _log_core.exception("Error requesting scanner stop")
         
         # Stop DB writer (drains queue, closes connection)
-        # Safe no-op for current builds that write directly.
         try:
             dbw = getattr(self, "db_writer", None)
             if dbw:
@@ -343,7 +270,7 @@ class WatchdogMonitor:
         except Exception:
             _log_core.exception("Error stopping database writer")
     
-        # Close DB connection (TASK-03 code may keep a dedicated writer connection instead)
+        # Close DB connection (legacy compatibility)
         try:
             if getattr(self, "conn", None):
                 self.conn.close()
@@ -359,22 +286,10 @@ def main():
     monitor = WatchdogMonitor()
     try:
         monitor.start()
-
-        # Keep the process alive for systemd.
-        # The signal handler / stop() will set monitor.running = False.
-        while monitor.running:
-            time.sleep(1)
-
     except KeyboardInterrupt:
         _log_core.info("Stopped by user")
     except Exception:
         _log_core.exception("Fatal error")
-    finally:
-        # Ensure cleanup even on unexpected exit paths
-        try:
-            monitor.stop()
-        except Exception:
-            _log_core.exception("Error during shutdown")
 
 
 if __name__ == "__main__":
