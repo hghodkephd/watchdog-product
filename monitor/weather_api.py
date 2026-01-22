@@ -3,19 +3,26 @@
 """
 Watchdog Environmental Monitor - Weather API
 Fetches weather data from Open-Meteo (free, no API key required)
+
+Features:
+- ZIP -> (lat, lon, timezone, label) via Open-Meteo geocoding API
+- Best-effort persistent cache: ~/Watchdog/monitor/data/geocode_cache.json
+- Current conditions via Open-Meteo forecast endpoint
+- Hourly series via forecast endpoint + start_date/end_date
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import requests
-import json
-from pathlib import Path
+
 
 # ---------------------------------------------------------------------
 # Simple container for a geo point with timezone
@@ -29,16 +36,15 @@ class WeatherPoint:
     timezone: str       # IANA timezone, e.g. "America/New_York"
 
 
- 
- # ---------------------------------------------------------------------
- # Simple geocode cache (ZIP -> lat/lon/tz/label)
- # ---------------------------------------------------------------------
- 
-_GEOCODE_CACHE_PATH = (
-     __import__("pathlib").Path.home() / "Watchdog" / "monitor" / "data" / "geocode_cache.json"
- )
- 
- 
+# ---------------------------------------------------------------------
+# Simple geocode cache (ZIP -> lat/lon/tz/label)
+# ---------------------------------------------------------------------
+
+_GEOCODE_CACHE_PATH: Path = (
+    Path.home() / "Watchdog" / "monitor" / "data" / "geocode_cache.json"
+)
+
+
 def _load_geocode_cache() -> Dict[str, Dict[str, Any]]:
     """Best-effort load of geocode cache; returns {} if missing/corrupt."""
     try:
@@ -49,8 +55,8 @@ def _load_geocode_cache() -> Dict[str, Dict[str, Any]]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
- 
- 
+
+
 def _save_geocode_cache(cache: Dict[str, Dict[str, Any]]) -> None:
     """Best-effort atomic save of geocode cache."""
     try:
@@ -62,7 +68,6 @@ def _save_geocode_cache(cache: Dict[str, Dict[str, Any]]) -> None:
     except Exception:
         # Cache failures should never break core functionality
         pass
- 
 
 
 # ---------------------------------------------------------------------
@@ -77,24 +82,24 @@ def _request_with_retry(
 ) -> requests.Response:
     """
     Make HTTP GET request with exponential backoff retry.
-    
+    Retries only timeouts; other request exceptions fail fast.
+
     Args:
         url: Request URL
         params: Query parameters
         max_retries: Maximum number of attempts
         base_timeout: Initial timeout in seconds
-    
+
     Returns:
         Response object
-    
+
     Raises:
         requests.RequestException: If all retries fail
     """
-    last_exception = None
-    
+    last_exception: Optional[Exception] = None
+
     for attempt in range(max_retries):
         try:
-            # Increase timeout with each retry
             timeout = base_timeout + (attempt * 5)
             resp = requests.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
@@ -102,18 +107,20 @@ def _request_with_retry(
         except requests.exceptions.Timeout as e:
             last_exception = e
             if attempt < max_retries - 1:
-                # Exponential backoff: 1s, 2s, 4s
-                wait_time = 2 ** attempt
+                wait_time = 2 ** attempt  # 1s, 2s, 4s...
                 time.sleep(wait_time)
         except requests.exceptions.RequestException as e:
             last_exception = e
-            break  # Don't retry on non-timeout errors
-    
+            break
+
+    # If we got here, all attempts failed.
+    if last_exception is None:
+        last_exception = requests.RequestException("Unknown request failure")
     raise last_exception
 
 
 # ---------------------------------------------------------------------
-# ZIP → lat/lon via Open-Meteo geocoding API
+# ZIP → lat/lon/tz/label via Open-Meteo geocoding API
 # ---------------------------------------------------------------------
 
 def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
@@ -122,7 +129,7 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
 
     We first try the bare ZIP (e.g. "01748"), and if that fails we try
     "01748, US". If both fail, we raise a ValueError.
-    
+
     Returns:
         WeatherPoint with latitude, longitude, label, and timezone
     """
@@ -131,26 +138,24 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
         raise ValueError("Empty ZIP code")
 
     base_url = "https://geocoding-api.open-meteo.com/v1/search"
-    
-     # Cache lookup first (stable mapping; no TTL needed)
-     cache_key = f"{country_code}:{z}"
-     cache = _load_geocode_cache()
-     cached = cache.get(cache_key)
-     if isinstance(cached, dict):
-         try:
-             return WeatherPoint(
-                 latitude=float(cached["latitude"]),
-                 longitude=float(cached["longitude"]),
-                 label=str(cached.get("label", f"{z}, {country_code}")),
-                 timezone=str(cached.get("timezone", "America/New_York")),
-             )
-         except Exception:
-             # Corrupt entry; fall through to live lookup
-             pass
 
-    # Try a couple of query variants to be robust
+    # Cache lookup first (stable mapping; no TTL needed)
+    cache_key = f"{country_code}:{z}"
+    cache = _load_geocode_cache()
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict):
+        try:
+            return WeatherPoint(
+                latitude=float(cached["latitude"]),
+                longitude=float(cached["longitude"]),
+                label=str(cached.get("label", f"{z}, {country_code}")),
+                timezone=str(cached.get("timezone", "America/New_York")),
+            )
+        except Exception:
+            # Corrupt entry; fall through to live lookup
+            pass
+
     query_variants = [z, f"{z}, {country_code}"]
-
     last_error: Optional[str] = None
 
     for name_query in query_variants:
@@ -175,34 +180,29 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
         r0 = results[0]
         lat = r0["latitude"]
         lon = r0["longitude"]
-        
-        # Extract timezone (Open-Meteo provides IANA timezone)
+
+        # Open-Meteo provides IANA timezone (sometimes absent)
         timezone = r0.get("timezone", "America/New_York")
 
-        label_parts = [
-            r0.get("name"),
-            r0.get("admin1"),
-            r0.get("country"),
-        ]
+        label_parts = [r0.get("name"), r0.get("admin1"), r0.get("country")]
         label = ", ".join(p for p in label_parts if p)
 
-         # Save to cache (best-effort)
-         cache[cache_key] = {
-             "latitude": lat,
-             "longitude": lon,
-             "timezone": timezone,
-             "label": label,
-         }
-         _save_geocode_cache(cache)
+        # Save to cache (best-effort)
+        cache[cache_key] = {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": timezone,
+            "label": label,
+        }
+        _save_geocode_cache(cache)
 
         return WeatherPoint(
-            latitude=lat, 
-            longitude=lon, 
+            latitude=lat,
+            longitude=lon,
             label=label,
-            timezone=timezone
+            timezone=timezone,
         )
 
-    # If we got here, both attempts failed
     if last_error is None:
         last_error = "Unknown geocoding error"
     raise ValueError(f"No location found for ZIP '{zipcode}': {last_error}")
@@ -215,10 +215,10 @@ def geocode_zip(zipcode: str, country_code: str = "US") -> WeatherPoint:
 def fetch_current_weather(lat: float, lon: float) -> dict:
     """
     Fetch current temperature, humidity, and wind speed at this lat/lon.
-    
+
     Returns:
-        dict with: time, temp_c, humidity, wind_mph
-        Returns None values on failure (graceful degradation)
+        dict with: time, temp_c, humidity, wind_mph, available
+        On failure returns available=False with error string.
     """
     base_url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -242,7 +242,6 @@ def fetch_current_weather(lat: float, lon: float) -> dict:
             "available": True,
         }
     except Exception as e:
-        # Return empty data on failure - graceful degradation
         return {
             "time": None,
             "temp_c": None,
@@ -254,7 +253,7 @@ def fetch_current_weather(lat: float, lon: float) -> dict:
 
 
 # ---------------------------------------------------------------------
-# Historical-ish series (up to a few days back) from Open-Meteo
+# Hourly series from Open-Meteo (forecast endpoint + start_date/end_date)
 # ---------------------------------------------------------------------
 
 def fetch_weather_series(
@@ -271,10 +270,10 @@ def fetch_weather_series(
 
     NOTE: Uses the forecast endpoint with start_date/end_date ONLY.
     We deliberately DO NOT pass 'past_days' to avoid 400 errors.
-    
+
     Returns:
         DataFrame with columns: timestamp, wx_temp_c, wx_humidity, wx_wind_mph
-        Returns None on failure
+        Returns None on failure.
     """
     base_url = "https://api.open-meteo.com/v1/forecast"
 
@@ -312,46 +311,16 @@ def fetch_weather_series(
                 "wx_wind_mph": winds,
             }
         )
-
         return df
     except Exception:
         return None
 
-def _load_cached_geocode():
-    try:
-        if not GEOCODE_CACHE_FILE.exists():
-            return None
 
-        with open(GEOCODE_CACHE_FILE, "r") as f:
-            data = json.load(f)
-
-        ts = data.get("timestamp")
-        if not ts or (time.time() - ts) > GEOCODE_CACHE_TTL:
-            return None
-
-        return data.get("lat"), data.get("lon")
-    except Exception:
-        return None
-
-
-def _save_geocode_cache(lat: float, lon: float):
-    try:
-        payload = {
-            "lat": lat,
-            "lon": lon,
-            "timestamp": time.time(),
-        }
-        with open(GEOCODE_CACHE_FILE, "w") as f:
-            json.dump(payload, f)
-    except Exception:
-        pass  # cache failure should never break weather
-        
 # ---------------------------------------------------------------------
 # Small manual test helper (optional)
 # ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Quick sanity check: python weather_api.py
     print("Testing geocoding...")
     wp = geocode_zip("01748")
     print(f"ZIP 01748 → {wp}")
