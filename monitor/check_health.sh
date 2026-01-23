@@ -1,5 +1,5 @@
 #!/bin/bash
-# Govee Monitor - System Health Check Script
+# Watchdog Monitor - System Health Check Script
 # Displays status of all services and system resources
 
 # Color codes
@@ -10,7 +10,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "=========================================="
-echo "  Govee Monitor Health Check"
+echo "  Watchdog Monitor Health Check"
 echo "  $(date)"
 echo "=========================================="
 echo ""
@@ -29,19 +29,19 @@ check_service() {
 
 # Check services
 echo -e "${BLUE}Service Status:${NC}"
-check_service govee-monitor.service
-check_service govee-dashboard.service
+check_service watchdog-monitor.service
+check_service watchdog-dashboard.service
 echo ""
 
 # Check if services are enabled for boot
 echo -e "${BLUE}Boot Configuration:${NC}"
-if systemctl is-enabled --quiet govee-monitor.service; then
+if systemctl is-enabled --quiet watchdog-monitor.service; then
     echo -e "${GREEN}✓ BLE monitoring will start on boot${NC}"
 else
     echo -e "${YELLOW}⚠ BLE monitoring NOT enabled for boot${NC}"
 fi
 
-if systemctl is-enabled --quiet govee-dashboard.service; then
+if systemctl is-enabled --quiet watchdog-dashboard.service; then
     echo -e "${GREEN}✓ Dashboard will start on boot${NC}"
 else
     echo -e "${YELLOW}⚠ Dashboard NOT enabled for boot${NC}"
@@ -50,7 +50,7 @@ echo ""
 
 # Check database
 echo -e "${BLUE}Database Status:${NC}"
-DB_PATH="$HOME/govee-monitor/data/data.sqlite3"
+DB_PATH="$HOME/Watchdog/monitor/data/data.sqlite3"
 if [ -f "$DB_PATH" ]; then
     DB_SIZE=$(du -h "$DB_PATH" | cut -f1)
     RECORD_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM readings;" 2>/dev/null || echo "N/A")
@@ -131,7 +131,7 @@ if command -v bluetoothctl &> /dev/null; then
         echo -e "${GREEN}✓ Bluetooth is powered on${NC}"
     else
         echo -e "${RED}✗ Bluetooth is powered off${NC}"
-        echo "  Run: sudo bluetoothctl power on"
+        echo "  Run: sudo bash ~/Watchdog/monitor/deploy/watchdog-bt-unblock.sh"
     fi
 else
     echo -e "${YELLOW}⚠ bluetoothctl not found${NC}"
@@ -140,8 +140,8 @@ echo ""
 
 # Check recent logs for errors
 echo -e "${BLUE}Recent Errors (last 10 lines):${NC}"
-BLE_ERRORS=$(journalctl -u govee-monitor.service --since "1 hour ago" -p err -n 10 --no-pager 2>/dev/null | tail -5)
-DASH_ERRORS=$(journalctl -u govee-dashboard.service --since "1 hour ago" -p err -n 10 --no-pager 2>/dev/null | tail -5)
+BLE_ERRORS=$(journalctl -u watchdog-monitor.service --since "1 hour ago" -p err -n 10 --no-pager 2>/dev/null | tail -5)
+DASH_ERRORS=$(journalctl -u watchdog-dashboard.service --since "1 hour ago" -p err -n 10 --no-pager 2>/dev/null | tail -5)
 
 if [ -z "$BLE_ERRORS" ] && [ -z "$DASH_ERRORS" ]; then
     echo -e "${GREEN}✓ No recent errors${NC}"
@@ -159,8 +159,8 @@ echo ""
 
 # Check process PIDs
 echo -e "${BLUE}Process Information:${NC}"
-BLE_PID=$(systemctl show -p MainPID govee-monitor.service 2>/dev/null | cut -d'=' -f2)
-DASH_PID=$(systemctl show -p MainPID govee-dashboard.service 2>/dev/null | cut -d'=' -f2)
+BLE_PID=$(systemctl show -p MainPID watchdog-monitor.service 2>/dev/null | cut -d'=' -f2)
+DASH_PID=$(systemctl show -p MainPID watchdog-dashboard.service 2>/dev/null | cut -d'=' -f2)
 
 if [ "$BLE_PID" != "0" ]; then
     echo "  BLE Monitor PID: $BLE_PID"
@@ -185,13 +185,13 @@ echo ""
 echo "=========================================="
 echo -e "${BLUE}Quick Actions:${NC}"
 echo "View live logs:"
-echo "  sudo journalctl -u govee-monitor.service -f"
+echo "  sudo journalctl -u watchdog-monitor.service -f"
 echo ""
 echo "Restart services:"
-echo "  sudo systemctl restart govee-monitor.service"
-echo "  sudo systemctl restart govee-dashboard.service"
+echo "  sudo systemctl restart watchdog-monitor.service"
+echo "  sudo systemctl restart watchdog-dashboard.service"
 echo ""
 echo "View detailed status:"
-echo "  sudo systemctl status govee-monitor.service"
+echo "  sudo systemctl status watchdog-monitor.service"
 echo ""
 echo "=========================================="

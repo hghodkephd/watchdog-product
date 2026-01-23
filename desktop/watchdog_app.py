@@ -13,7 +13,12 @@ from typing import Optional
 import webview
 
 from app_config import Config
-from discovery import verify_connection, discover_watchdog_fast
+from discovery import (
+    verify_connection, 
+    discover_watchdog_fast,
+    discover_watchdog_with_status,
+    get_discovery_help
+)
 
 __version__ = "1.0.0"
 APP_NAME = "Watchdog"
@@ -35,6 +40,9 @@ class WatchdogApp:
         
         # Pre-fill with saved IP if available
         saved_ip = self.get_saved_ip() or ""
+        
+        # Get platform-specific help text
+        help_text = get_discovery_help().replace('\n', '\\n').replace("'", "\\'")
         
         return f"""
         <!DOCTYPE html>
@@ -58,7 +66,7 @@ class WatchdogApp:
                     backdrop-filter: blur(10px);
                     border-radius: 16px;
                     padding: 40px;
-                    width: 400px;
+                    width: 420px;
                     text-align: center;
                     border: 1px solid rgba(255,255,255,0.1);
                 }}
@@ -85,6 +93,11 @@ class WatchdogApp:
                 .status.success {{
                     background: rgba(100,255,100,0.1);
                     border-color: rgba(100,255,100,0.3);
+                }}
+                .status-detail {{
+                    font-size: 12px;
+                    color: #888;
+                    margin-top: 8px;
                 }}
                 input {{
                     width: 100%;
@@ -127,6 +140,15 @@ class WatchdogApp:
                     margin-top: 12px;
                 }}
                 .secondary:hover {{ color: #aaa; }}
+                .help-link {{
+                    background: transparent;
+                    color: #4a9eff;
+                    margin-top: 8px;
+                    font-size: 14px;
+                    text-decoration: underline;
+                    cursor: pointer;
+                }}
+                .help-link:hover {{ color: #6ab4ff; }}
                 .spinner {{
                     width: 24px;
                     height: 24px;
@@ -137,6 +159,20 @@ class WatchdogApp:
                     margin-top: 12px;
                 }}
                 @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+                .help-panel {{
+                    display: none;
+                    background: rgba(0,0,0,0.3);
+                    border-radius: 8px;
+                    padding: 16px;
+                    margin-top: 16px;
+                    text-align: left;
+                    font-size: 13px;
+                    white-space: pre-line;
+                    color: #aaa;
+                }}
+                .help-panel.visible {{
+                    display: block;
+                }}
             </style>
         </head>
         <body>
@@ -147,6 +183,7 @@ class WatchdogApp:
                 
                 <div id="status" class="status">
                     <span id="status-text">Searching for your Watchdog...</span>
+                    <span id="status-detail" class="status-detail"></span>
                     <div class="spinner" id="spinner"></div>
                 </div>
                 
@@ -159,6 +196,9 @@ class WatchdogApp:
                 
                 <button class="primary" id="connect-btn" onclick="connect()">Connect</button>
                 <button class="secondary" onclick="quit()">Cancel</button>
+                <button class="help-link" onclick="toggleHelp()">Need help finding your Watchdog?</button>
+                
+                <div id="help-panel" class="help-panel">{help_text}</div>
             </div>
             
             <script>
@@ -169,33 +209,40 @@ class WatchdogApp:
                     setTimeout(startDiscovery, 100);
                 }});
                 
+                function toggleHelp() {{
+                    const panel = document.getElementById('help-panel');
+                    panel.classList.toggle('visible');
+                }}
+                
                 async function startDiscovery() {{
                     const existingIp = document.getElementById('ip').value.trim();
                     
                     // If we have a saved IP, try it first (fast path)
                     if (existingIp) {{
-                        updateStatus('Checking saved address...', 'pending');
+                        updateStatus('Checking saved address...', 'pending', 'Verifying ' + existingIp);
                         const result = await tryApi('quick_verify', existingIp);
                         if (result && result.success) {{
-                            updateStatus('✓ Found Watchdog at ' + existingIp, 'success');
+                            updateStatus('✓ Found Watchdog at ' + existingIp, 'success', 'Connection verified');
                             setTimeout(connect, 500);
                             return;
+                        }} else {{
+                            updateStatus('Saved address not responding', 'pending', 'Searching network...');
                         }}
                     }}
                     
-                    // Background discovery
-                    updateStatus('Searching for your Watchdog...', 'pending');
-                    const result = await tryApi('discover');
+                    // Background discovery with status
+                    updateStatus('Searching for your Watchdog...', 'pending', '');
+                    const result = await tryApi('discover_with_status');
                     discoveryComplete = true;
                     
                     document.getElementById('spinner').style.display = 'none';
                     
                     if (result && result.found) {{
                         document.getElementById('ip').value = result.ip;
-                        updateStatus('✓ Found Watchdog at ' + result.ip, 'success');
+                        updateStatus('✓ Found Watchdog at ' + result.ip, 'success', result.status || '');
                         setTimeout(connect, 800);
                     }} else {{
-                        updateStatus('Enter your Watchdog IP address:', 'pending');
+                        updateStatus('Could not find Watchdog automatically', 'error', result ? result.status : 'Enter IP address manually');
                         document.getElementById('spinner').style.display = 'none';
                     }}
                 }}
@@ -211,12 +258,14 @@ class WatchdogApp:
                     return null;
                 }}
                 
-                function updateStatus(text, type) {{
+                function updateStatus(text, type, detail) {{
                     const statusEl = document.getElementById('status');
                     const statusText = document.getElementById('status-text');
+                    const statusDetail = document.getElementById('status-detail');
                     const spinner = document.getElementById('spinner');
                     
                     statusText.innerHTML = text;
+                    statusDetail.innerHTML = detail || '';
                     
                     if (type === 'success') {{
                         statusEl.className = 'status success';
@@ -234,26 +283,26 @@ class WatchdogApp:
                     const btn = document.getElementById('connect-btn');
                     
                     if (!ip) {{
-                        updateStatus('Please enter an IP address', 'error');
+                        updateStatus('Please enter an IP address', 'error', '');
                         return;
                     }}
                     
                     if (!ip.match(/^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$/)) {{
-                        updateStatus('Invalid IP address format', 'error');
+                        updateStatus('Invalid IP address format', 'error', 'Example: 192.168.0.21');
                         return;
                     }}
                     
                     btn.disabled = true;
                     btn.textContent = 'Connecting...';
-                    updateStatus('Connecting to ' + ip + '...', 'pending');
+                    updateStatus('Connecting to ' + ip + '...', 'pending', '');
                     document.getElementById('spinner').style.display = 'block';
                     
                     const result = await tryApi('connect', ip);
                     
                     if (result && result.success) {{
-                        updateStatus('✓ Connected! Opening dashboard...', 'success');
+                        updateStatus('✓ Connected! Opening dashboard...', 'success', '');
                     }} else {{
-                        updateStatus('Could not connect to ' + ip, 'error');
+                        updateStatus('Could not connect to ' + ip, 'error', result ? result.error : 'Check IP and try again');
                         btn.disabled = false;
                         btn.textContent = 'Connect';
                     }}
@@ -277,8 +326,8 @@ class WatchdogApp:
         self.window = webview.create_window(
             APP_NAME,
             html=self.get_setup_html(),
-            width=450,
-            height=520,
+            width=460,
+            height=560,
             resizable=False,
             js_api=api,
         )
@@ -298,13 +347,20 @@ class SetupAPI:
         return {"success": False}
     
     def discover(self) -> dict:
-        """Fast parallel discovery."""
-        # Try mDNS first
+        """Fast parallel discovery (backward compatible)."""
         ip = discover_watchdog_fast()
         if ip:
             return {"found": True, "ip": ip}
+        return {"found": False, "ip": None}
+    
+    def discover_with_status(self) -> dict:
+        """Discovery with detailed status for better UI feedback."""
+        # First try fast mDNS
+        ip, status = discover_watchdog_with_status()
+        if ip:
+            return {"found": True, "ip": ip, "status": status}
         
-        # Parallel scan common IPs
+        # Fall back to parallel scan of common IPs
         common_ips = [
             "192.168.0.21", "192.168.1.21",
             "192.168.0.100", "192.168.1.100",
@@ -313,7 +369,6 @@ class SetupAPI:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                
                 executor.submit(verify_connection, ip, 8501, 0.8): ip 
                 for ip in common_ips
             }
@@ -322,23 +377,23 @@ class SetupAPI:
                     ip = futures[future]
                     try:
                         if future.result():
-                            return {"found": True, "ip": ip}
+                            return {"found": True, "ip": ip, "status": "Found via network scan"}
                     except Exception:
                         pass
             except concurrent.futures.TimeoutError:
                 pass
         
-        return {"found": False, "ip": None}
+        return {"found": False, "ip": None, "status": status}
     
     def connect(self, ip: str) -> dict:
         """Connect and launch dashboard."""
         if verify_connection(ip, port=8501, timeout=2.0):
             self.app.config.set("watchdog_ip", ip)
-            self.app.window.load_url(f"http://{ip}")
+            self.app.window.load_url(f"http://{ip}:8501")
             self.app.window.resize(1200, 800)
             self.app.window.set_title(APP_NAME)
             return {"success": True}
-        return {"success": False}
+        return {"success": False, "error": "Dashboard not responding"}
     
     def quit(self):
         """Exit application."""
