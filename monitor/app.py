@@ -21,8 +21,8 @@ from process_manager import start_monitoring, stop_monitoring, get_monitoring_st
 
 # Alarm system
 from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
-from notifications import EmailConfig, send_test_email, send_alarm_email, send_cleared_email
 from alarm_ui import render_alarm_banners, process_alerts_and_notify, render_email_settings
+from notifications import EmailSettings as EmailConfig, send_test_email, send_alarm_email
 
 # Page config
 st.set_page_config(
