@@ -61,6 +61,18 @@ class AlertConfig:
     disk_critical_mb: int = 100     # Critical when below 100 MB
 
 
+@dataclass
+class EmailConfig:
+    """Email notification settings."""
+    enabled: bool = False
+    recipient: str = ""
+    smtp_server: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    sender_email: str = ""
+    sender_password: str = ""
+    rate_limit_minutes: int = 30
+    notify_on_clear: bool = True
+
 # ------------------------
 # Archive configuration
 # ------------------------
@@ -127,6 +139,9 @@ class AppConfig:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     monitoring: MonitoringState = field(default_factory=MonitoringState)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)  # ADD THIS
+    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
 
     # ------------------------
     # Serialization
@@ -135,6 +150,8 @@ class AppConfig:
     def to_json(self) -> str:
         def encode(obj):
             if isinstance(obj, (SensorConfig, WeatherConfig, AlertConfig, ArchiveConfig, MonitoringState)):
+                return asdict(obj)
+            if isinstance(obj, (SensorConfig, WeatherConfig, AlertConfig, ArchiveConfig, MonitoringState, EmailConfig)):
                 return asdict(obj)
             if isinstance(obj, AppConfig):
                 data = asdict(obj)
@@ -147,6 +164,7 @@ class AppConfig:
                 data["alerts"] = asdict(obj.alerts)
                 data["archive"] = asdict(obj.archive)
                 data["monitoring"] = asdict(obj.monitoring)
+                data["email"] = asdict(obj.email)
                 return data
             raise TypeError(f"Type {type(obj)} not serializable")
 
@@ -188,7 +206,14 @@ class AppConfig:
             raw["archive"] = ArchiveConfig(**archive_raw)
         else:
             raw["archive"] = ArchiveConfig()
-
+        
+        # email (backward compatible)
+        email_raw = raw.get("email")
+        if email_raw:
+            raw["email"] = EmailConfig(**email_raw)
+        else:
+            raw["email"] = EmailConfig()
+            
         # monitoring state (backward compatible)
         monitoring_raw = raw.get("monitoring")
         if monitoring_raw:

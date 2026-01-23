@@ -19,6 +19,11 @@ from alerts import check_alerts, format_alert_display
 from weather_api import geocode_zip, fetch_current_weather, fetch_weather_series
 from process_manager import start_monitoring, stop_monitoring, get_monitoring_status
 
+# Alarm system
+from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
+from notifications import EmailConfig, send_test_email, send_alarm_email, send_cleared_email
+from alarm_ui import render_alarm_banners, process_alerts_and_notify, render_email_settings
+
 # Page config
 st.set_page_config(
     page_title="Watchdog Environmental Monitor",
@@ -178,6 +183,8 @@ tab1, tab2, tab3 = st.tabs(["📊 Monitoring", "⚙️ Setup", "🔧 Settings"])
 # TAB 1: MONITORING (OSS-STYLE)
 # ====================
 with tab1:
+    # === Alarm banners (persistent alerts) ===
+    render_alarm_banners(cfg)
     # Check monitoring status
     status = get_monitoring_status()
     
@@ -367,9 +374,9 @@ with tab1:
 
             # Check for alerts (configured sensors only, if any are configured)
             alerts = check_alerts(df_display, cfg)
-            if alerts:
-                for alert in alerts:
-                    st.error(format_alert_display(alert))
+            # Process through alarm state manager + send notifications
+            email_config = getattr(cfg, 'email', None)
+            process_alerts_and_notify(alerts, cfg, email_config)
 
             # Display current readings
             st.subheader("Current Readings")
@@ -1012,6 +1019,11 @@ with tab3:
             "Enable Temperature Alerts",
             value=cfg.alerts.temp_alerts_enabled
         )
+    
+    # Email notifications
+    new_email_config = render_email_settings(getattr(cfg, 'email', None))
+    if new_email_config is not None:
+        cfg.email = new_email_config
     
     st.divider()
     
