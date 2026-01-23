@@ -2,19 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Alarm UI components for Streamlit dashboard.
-
-ADD these functions to app.py and call them from the appropriate places.
 """
 
 import streamlit as st
 import time
 from datetime import datetime
 
-# =============================================================================
-# IMPORTS TO ADD at top of app.py
-# =============================================================================
-# from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
-# from notifications import EmailConfig, send_test_email, send_alarm_email, send_cleared_email
+from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
+from notifications import SUGGESTED_ACTIONS, send_test_email, send_alarm_email, send_cleared_email
+from config import EmailConfig
 
 
 # =============================================================================
@@ -62,7 +58,6 @@ def render_alarm_banners(cfg):
             dur_str = f"{int(dur_sec)}s"
         
         # Get suggested action
-        from notifications import SUGGESTED_ACTIONS
         action = SUGGESTED_ACTIONS.get(alarm.alert_type, "Check the sensor.")
         
         # Render banner
@@ -148,9 +143,6 @@ def process_alerts_and_notify(alerts, cfg, email_config):
         alerts = check_alerts(df_latest, cfg)
         process_alerts_and_notify(alerts, cfg, email_config)
     """
-    from alarm_state import process_alerts, get_alarm_manager
-    from notifications import send_alarm_email, send_cleared_email
-    
     manager = get_alarm_manager()
     
     # Process alerts into alarm states
@@ -209,15 +201,19 @@ def render_email_settings(email_config):
         "Emails are rate-limited to prevent spam."
     )
     
+    # Use provided config or create default
+    if email_config is None:
+        email_config = EmailConfig()
+    
     # Enable toggle
     enabled = st.checkbox(
         "Enable Email Notifications",
-        value=email_config.enabled if email_config else False,
+        value=email_config.enabled,
         key="email_enabled"
     )
     
     if not enabled:
-        if email_config and email_config.enabled:
+        if email_config.enabled:
             # User disabled - return updated config
             return EmailConfig(enabled=False)
         return None
@@ -228,20 +224,20 @@ def render_email_settings(email_config):
     with col1:
         recipient = st.text_input(
             "Send alerts to",
-            value=email_config.recipient if email_config else "",
+            value=email_config.recipient,
             placeholder="your@email.com",
             key="email_recipient"
         )
         
         smtp_server = st.text_input(
             "SMTP Server",
-            value=email_config.smtp_server if email_config else "smtp.gmail.com",
+            value=email_config.smtp_server,
             key="email_smtp_server"
         )
         
         sender_email = st.text_input(
             "Sender Email",
-            value=email_config.sender_email if email_config else "",
+            value=email_config.sender_email,
             placeholder="watchdog@gmail.com",
             key="email_sender"
         )
@@ -251,14 +247,14 @@ def render_email_settings(email_config):
             "Rate limit (minutes between emails)",
             min_value=5,
             max_value=120,
-            value=email_config.rate_limit_minutes if email_config else 30,
+            value=email_config.rate_limit_minutes,
             step=5,
             key="email_rate_limit"
         )
         
         smtp_port = st.number_input(
             "SMTP Port",
-            value=email_config.smtp_port if email_config else 587,
+            value=email_config.smtp_port,
             min_value=1,
             max_value=65535,
             key="email_smtp_port"
@@ -266,7 +262,7 @@ def render_email_settings(email_config):
         
         sender_password = st.text_input(
             "App Password",
-            value=email_config.sender_password if email_config else "",
+            value=email_config.sender_password,
             type="password",
             help="For Gmail, use an App Password (not your regular password)",
             key="email_password"
@@ -274,7 +270,7 @@ def render_email_settings(email_config):
     
     notify_on_clear = st.checkbox(
         "Send email when alarm clears",
-        value=email_config.notify_on_clear if email_config else True,
+        value=email_config.notify_on_clear,
         key="email_notify_clear"
     )
     
@@ -296,7 +292,6 @@ def render_email_settings(email_config):
     with col1:
         if st.button("📤 Send Test Email", disabled=not test_config.is_configured()):
             with st.spinner("Sending..."):
-                from notifications import send_test_email
                 success, msg = send_test_email(test_config)
                 if success:
                     st.success("✓ Test email sent! Check your inbox.")
@@ -332,100 +327,3 @@ def render_email_settings(email_config):
     
     # Return updated config
     return test_config
-
-
-# =============================================================================
-# 4. INTEGRATION EXAMPLE - How to modify app.py
-# =============================================================================
-
-"""
-In app.py, make these changes:
-
-1. ADD IMPORTS at top:
-   from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
-   from notifications import EmailConfig, send_test_email, send_alarm_email
-
-2. LOAD EMAIL CONFIG (after cfg = load_config()):
-   email_config = getattr(cfg, 'email', None) or EmailConfig()
-
-3. IN TAB 1 (Monitoring), BEFORE other content:
-   # Render alarm banners at top
-   render_alarm_banners(cfg)
-
-4. IN TAB 1, AFTER check_alerts():
-   # Replace:
-   #   alerts = check_alerts(df_latest, cfg)
-   # With:
-   alerts = check_alerts(df_latest, cfg)
-   process_alerts_and_notify(alerts, cfg, email_config)
-
-5. IN TAB 3 (Settings), AFTER alert config section:
-   st.divider()
-   new_email_config = render_email_settings(email_config)
-   if new_email_config:
-       cfg.email = new_email_config
-       # Save will happen with "Save All Settings" button
-"""
-
-
-# =============================================================================
-# 5. QUICK INTEGRATION - Copy-paste block for top of Monitoring tab
-# =============================================================================
-
-def alarm_banner_block(cfg):
-    """
-    Quick integration block. Call at top of Monitoring tab.
-    
-    Usage in app.py:
-        with tab1:
-            from alarm_ui import alarm_banner_block
-            alarm_banner_block(cfg)
-            # ... rest of monitoring tab ...
-    """
-    try:
-        from alarm_state import get_alarm_manager, Severity
-        from notifications import SUGGESTED_ACTIONS
-        
-        manager = get_alarm_manager()
-        visible = manager.get_all_visible()
-        
-        if not visible:
-            return
-        
-        visible.sort(key=lambda a: (-a.severity.value, -a.duration_seconds))
-        
-        for alarm in visible:
-            is_crit = alarm.severity == Severity.CRITICAL
-            icon = "🔴" if is_crit else "🟡"
-            label = "CRITICAL" if is_crit else "WARNING"
-            
-            dur = alarm.duration_seconds
-            dur_str = f"{int(dur//3600)}h {int((dur%3600)//60)}m" if dur >= 3600 else f"{int(dur//60)}m" if dur >= 60 else f"{int(dur)}s"
-            
-            action = SUGGESTED_ACTIONS.get(alarm.alert_type, "Check the sensor.")
-            
-            if is_crit:
-                st.error(f"{icon} **{label}** ({dur_str}): **{alarm.sensor_name}** - {alarm.message}\n\n💡 {action}")
-            else:
-                st.warning(f"{icon} **{label}** ({dur_str}): **{alarm.sensor_name}** - {alarm.message}\n\n💡 {action}")
-            
-            if not alarm.is_silenced:
-                c1, c2, c3, _ = st.columns([1, 1, 1, 2])
-                if c1.button("🔕 15m", key=f"s15_{alarm.key}"):
-                    manager.silence(alarm.sensor_id, alarm.alert_type, "15min")
-                    st.rerun()
-                if c2.button("🔕 1h", key=f"s1h_{alarm.key}"):
-                    manager.silence(alarm.sensor_id, alarm.alert_type, "1hour")
-                    st.rerun()
-                if c3.button("🔕 Clear", key=f"scl_{alarm.key}"):
-                    manager.silence(alarm.sensor_id, alarm.alert_type, "until_resolved")
-                    st.rerun()
-            else:
-                if st.button("🔔 Unsilence", key=f"uns_{alarm.key}"):
-                    manager.unsilence(alarm.sensor_id, alarm.alert_type)
-                    st.rerun()
-        
-        st.divider()
-    
-    except ImportError:
-        pass  # Alarm modules not yet installed

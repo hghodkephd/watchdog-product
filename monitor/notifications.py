@@ -10,35 +10,18 @@ from __future__ import annotations
 
 import smtplib
 import ssl
-from dataclasses import dataclass
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from logging_config import get_logger
 
+# Import EmailConfig from config to avoid duplicate definitions
+if TYPE_CHECKING:
+    from config import EmailConfig
+
 _log = get_logger("watchdog.email")
-
-
-@dataclass
-class EmailConfig:
-    """Email notification settings. Add to config.py AppConfig."""
-    enabled: bool = False
-    recipient: str = ""
-    smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    sender_email: str = ""
-    sender_password: str = ""       # App password for Gmail
-    rate_limit_minutes: int = 30
-    
-    def is_configured(self) -> bool:
-        return bool(
-            self.enabled and
-            self.recipient and
-            self.sender_email and
-            self.sender_password
-        )
 
 
 # Suggested actions per alert type
@@ -51,7 +34,7 @@ SUGGESTED_ACTIONS = {
 }
 
 
-def _send_email(config: EmailConfig, subject: str, body_text: str, body_html: str) -> tuple[bool, str]:
+def _send_email(config: "EmailConfig", subject: str, body_text: str, body_html: str) -> tuple[bool, str]:
     """Send email via SMTP. Returns (success, message)."""
     if not config.is_configured():
         return False, "Email not configured"
@@ -84,7 +67,7 @@ def _send_email(config: EmailConfig, subject: str, body_text: str, body_html: st
         return False, str(e)
 
 
-def send_test_email(config: EmailConfig) -> tuple[bool, str]:
+def send_test_email(config: "EmailConfig") -> tuple[bool, str]:
     """Send test email to verify configuration."""
     subject = "🐕 Watchdog Test Email"
     body_text = (
@@ -104,14 +87,14 @@ def send_test_email(config: EmailConfig) -> tuple[bool, str]:
 
 
 def send_alarm_email(
-    config: EmailConfig,
+    config: "EmailConfig",
     sensor_name: str,
     sensor_id: str,
     severity: str,
     alert_type: str,
     message: str,
-    current_value: Optional[str] = None,
-    threshold: Optional[str] = None,
+    current_value: str = None,
+    threshold: str = None,
 ) -> tuple[bool, str]:
     """Send alarm notification email."""
     if not config.is_configured():
@@ -177,7 +160,7 @@ Open your Watchdog dashboard to view details and manage alerts.
 
 
 def send_cleared_email(
-    config: EmailConfig,
+    config: "EmailConfig",
     sensor_name: str,
     sensor_id: str,
     alert_type: str,
