@@ -1,125 +1,169 @@
 #!/bin/bash
+#
+# Watchdog Desktop App - Linux Build Script
+# Produces: watchdog executable + tarball
+#
+# Usage: cd desktop && ./build_linux.sh
+# Output: ../releases/desktop/linux/
+#
+# Requirements:
+#   - Ubuntu 20.04+ / Debian 11+ (or equivalent)
+#   - Python 3.9+
+#   - GTK WebKit: sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.0
+#
+
 set -e
 
 echo "========================================"
-echo "Building Watchdog for Linux"
+echo "Watchdog Desktop - Linux Build"
 echo "========================================"
+echo ""
 
-# Check for Python
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+APP_NAME="Watchdog"
+APP_NAME_LOWER="watchdog"
+APP_VERSION="1.0.0"
+OUTPUT_DIR="$SCRIPT_DIR/../releases/desktop/linux"
+VENV_DIR="$SCRIPT_DIR/.build-venv"
+
+# Clean previous builds
+echo "[1/7] Cleaning previous builds..."
+rm -rf build/ dist/ *.spec
+rm -rf "$VENV_DIR"
+mkdir -p "$OUTPUT_DIR"
+
+# Check Python
+echo "[2/7] Checking Python..."
 if ! command -v python3 &> /dev/null; then
     echo "ERROR: python3 not found"
     exit 1
 fi
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "  Found Python $PYTHON_VERSION"
 
-# Check for GTK WebKit (required by pywebview on Linux)
-echo ""
-echo "Checking GTK WebKit dependencies..."
-
-# Try to detect the package manager and check for required packages
+# Check GTK WebKit
+echo "[3/7] Checking GTK WebKit..."
+GTK_MISSING=false
 if command -v dpkg &> /dev/null; then
     # Debian/Ubuntu
-    MISSING=""
-    for pkg in python3-gi python3-gi-cairo gir1.2-webkit2-4.0 gir1.2-webkit2-4.1; do
-        if dpkg -s "$pkg" &> /dev/null 2>&1; then
-            echo "  ✓ $pkg installed"
-            break
-        fi
-    done
-    
-    # Check if at least one webkit package is installed
     if ! dpkg -s gir1.2-webkit2-4.0 &> /dev/null 2>&1 && \
        ! dpkg -s gir1.2-webkit2-4.1 &> /dev/null 2>&1; then
-        echo ""
-        echo "WARNING: GTK WebKit not found. Please install:"
-        echo "  sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.0"
-        echo ""
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
+        GTK_MISSING=true
     fi
-elif command -v rpm &> /dev/null; then
-    # Fedora/RHEL
-    echo "  Fedora/RHEL detected"
-    echo "  Required packages: python3-gobject gtk3 webkit2gtk3"
 fi
 
-# Install Python dependencies
-echo ""
-echo "Installing Python dependencies..."
-python3 -m pip install -r requirements.txt --quiet
+if [ "$GTK_MISSING" = true ]; then
+    echo "  WARNING: GTK WebKit may not be installed"
+    echo "  Install with: sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.0"
+    echo ""
+    read -p "  Continue anyway? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+else
+    echo "  ✓ GTK WebKit found"
+fi
 
-# Clean previous builds
-echo ""
-echo "Cleaning previous builds..."
-rm -rf build/ dist/ *.spec
+# Create build environment
+echo "[4/7] Creating build environment..."
+python3 -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
 
-# Determine icon flag
+# Install dependencies
+echo "[5/7] Installing dependencies..."
+pip install --upgrade pip wheel --quiet
+pip install pywebview pyinstaller --quiet
+
+# Check resources
+echo "[6/7] Checking resources..."
 ICON_FLAG=""
 if [ -f "resources/icon.png" ]; then
     ICON_FLAG="--icon=resources/icon.png"
-    echo "Using icon: resources/icon.png"
+    echo "  ✓ Using icon: resources/icon.png"
 else
-    echo "Warning: No icon found, building without icon"
+    echo "  ⚠ No icon found"
+fi
+
+DATA_FLAGS=""
+if [ -d "resources" ]; then
+    DATA_FLAGS="--add-data=resources:resources"
 fi
 
 # Build with PyInstaller
-echo ""
-echo "Building application..."
-python3 -m PyInstaller \
-    --name="watchdog" \
+echo "[7/7] Building application..."
+python -m PyInstaller \
+    --name="$APP_NAME_LOWER" \
     --windowed \
     --onefile \
     $ICON_FLAG \
-    --add-data="resources:resources" \
+    $DATA_FLAGS \
     --noconfirm \
     --clean \
+    --log-level=WARN \
+    --hidden-import=webview \
+    --hidden-import=webview.platforms.gtk \
+    --hidden-import=gi \
+    --collect-all=webview \
     watchdog_app.py
 
-# Check if build succeeded
-if [ -f "dist/watchdog" ]; then
+# Verify build
+if [ ! -f "dist/$APP_NAME_LOWER" ]; then
     echo ""
-    echo "========================================"
-    echo "✅ Build successful!"
-    echo "========================================"
-    echo ""
-    echo "Output: dist/watchdog"
-    echo ""
-    echo "To test: ./dist/watchdog"
-    echo ""
-    
-    # Show size
-    SIZE=$(du -sh dist/watchdog | cut -f1)
-    echo "Size: $SIZE"
-    
-    # Make executable
-    chmod +x dist/watchdog
-    
-    echo ""
-    echo "To install system-wide:"
-    echo "  sudo cp dist/watchdog /usr/local/bin/"
-    
-    # Create .desktop file for application menu
-    echo ""
-    echo "Creating .desktop file..."
-    cat > dist/watchdog.desktop << 'EOF'
+    echo "ERROR: Build failed - $APP_NAME_LOWER not created"
+    deactivate
+    exit 1
+fi
+echo "  ✓ $APP_NAME_LOWER created"
+
+# Copy to output
+cp "dist/$APP_NAME_LOWER" "$OUTPUT_DIR/"
+chmod +x "$OUTPUT_DIR/$APP_NAME_LOWER"
+FILE_SIZE=$(du -sh "$OUTPUT_DIR/$APP_NAME_LOWER" | cut -f1)
+echo "  ✓ Copied to $OUTPUT_DIR ($FILE_SIZE)"
+
+# Create .desktop file
+cat > "$OUTPUT_DIR/$APP_NAME_LOWER.desktop" << EOF
 [Desktop Entry]
-Name=Watchdog
+Name=$APP_NAME
 Comment=Environmental Monitor Dashboard
-Exec=/usr/local/bin/watchdog
-Icon=watchdog
+Exec=$APP_NAME_LOWER
+Icon=$APP_NAME_LOWER
 Terminal=false
 Type=Application
 Categories=Utility;Monitor;
 EOF
-    echo "Desktop entry created: dist/watchdog.desktop"
-    echo "  Install with: cp dist/watchdog.desktop ~/.local/share/applications/"
-    
-else
-    echo ""
-    echo "========================================"
-    echo "❌ Build failed!"
-    echo "========================================"
-    exit 1
-fi
+echo "  ✓ Desktop entry created"
+
+# Create tarball
+echo ""
+echo "Creating tarball..."
+TAR_NAME="$APP_NAME-$APP_VERSION-linux-x86_64.tar.gz"
+cd "$OUTPUT_DIR"
+tar -czf "$TAR_NAME" "$APP_NAME_LOWER" "$APP_NAME_LOWER.desktop"
+cd "$SCRIPT_DIR"
+TAR_SIZE=$(du -sh "$OUTPUT_DIR/$TAR_NAME" | cut -f1)
+echo "  ✓ Tarball created: $TAR_NAME ($TAR_SIZE)"
+
+# Cleanup
+deactivate
+rm -rf "$VENV_DIR" build/ dist/ *.spec
+
+echo ""
+echo "========================================"
+echo "✅ Linux Build Complete!"
+echo "========================================"
+echo ""
+echo "Output: $OUTPUT_DIR"
+echo ""
+ls -la "$OUTPUT_DIR"
+echo ""
+echo "To test: '$OUTPUT_DIR/$APP_NAME_LOWER'"
+echo ""
+echo "To install system-wide:"
+echo "  sudo cp '$OUTPUT_DIR/$APP_NAME_LOWER' /usr/local/bin/"
+echo "  cp '$OUTPUT_DIR/$APP_NAME_LOWER.desktop' ~/.local/share/applications/"
+echo ""
