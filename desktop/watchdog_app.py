@@ -3,7 +3,7 @@
 Watchdog Desktop App
 Cross-platform launcher for Watchdog Environmental Monitor
 
-Optimized for instant launch with background discovery.
+Optimized for instant launch with background discovery and health monitoring.
 """
 
 import sys
@@ -17,7 +17,11 @@ from discovery import (
     verify_connection, 
     discover_watchdog_fast,
     discover_watchdog_with_status,
-    get_discovery_help
+    discover_and_check_health,
+    check_watchdog_health,
+    format_health_for_display,
+    get_discovery_help,
+    WatchdogHealth,
 )
 
 __version__ = "1.0.0"
@@ -30,6 +34,8 @@ class WatchdogApp:
     def __init__(self):
         self.config = Config()
         self.window: Optional[webview.Window] = None
+        self._current_ip: Optional[str] = None
+        self._health_check_interval = 30  # seconds
         
     def get_saved_ip(self) -> Optional[str]:
         """Quick check for saved IP only (no network calls)."""
@@ -66,7 +72,7 @@ class WatchdogApp:
                     backdrop-filter: blur(10px);
                     border-radius: 16px;
                     padding: 40px;
-                    width: 420px;
+                    width: 460px;
                     text-align: center;
                     border: 1px solid rgba(255,255,255,0.1);
                 }}
@@ -80,7 +86,7 @@ class WatchdogApp:
                     padding: 16px; 
                     margin-bottom: 24px;
                     font-size: 14px;
-                    min-height: 60px;
+                    min-height: 80px;
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -94,10 +100,21 @@ class WatchdogApp:
                     background: rgba(100,255,100,0.1);
                     border-color: rgba(100,255,100,0.3);
                 }}
+                .status.warning {{
+                    background: rgba(255,200,0,0.1);
+                    border-color: rgba(255,200,0,0.3);
+                }}
                 .status-detail {{
                     font-size: 12px;
                     color: #888;
                     margin-top: 8px;
+                }}
+                .health-indicator {{
+                    font-size: 12px;
+                    margin-top: 8px;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    background: rgba(0,0,0,0.2);
                 }}
                 input {{
                     width: 100%;
@@ -184,6 +201,7 @@ class WatchdogApp:
                 <div id="status" class="status">
                     <span id="status-text">Searching for your Watchdog...</span>
                     <span id="status-detail" class="status-detail"></span>
+                    <span id="health-indicator" class="health-indicator" style="display: none;"></span>
                     <div class="spinner" id="spinner"></div>
                 </div>
                 
@@ -203,6 +221,7 @@ class WatchdogApp:
             
             <script>
                 let discoveryComplete = false;
+                let healthCheckInterval = null;
                 
                 // Start discovery immediately when page loads
                 document.addEventListener('DOMContentLoaded', function() {{
@@ -217,34 +236,77 @@ class WatchdogApp:
                 async function startDiscovery() {{
                     const existingIp = document.getElementById('ip').value.trim();
                     
-                    // If we have a saved IP, try it first (fast path)
+                    // If we have a saved IP, try it first with health check
                     if (existingIp) {{
                         updateStatus('Checking saved address...', 'pending', 'Verifying ' + existingIp);
-                        const result = await tryApi('quick_verify', existingIp);
-                        if (result && result.success) {{
-                            updateStatus('✓ Found Watchdog at ' + existingIp, 'success', 'Connection verified');
-                            setTimeout(connect, 500);
-                            return;
+                        const result = await tryApi('check_health', existingIp);
+                        
+                        if (result && result.reachable) {{
+                            showHealthStatus(result, existingIp);
+                            
+                            if (result.dashboard_up) {{
+                                setTimeout(connect, 1000);
+                                return;
+                            }} else {{
+                                updateStatus('Dashboard not responding', 'warning', 
+                                    result.daemon_running ? 'Monitoring is running but dashboard is down' : 'Monitoring service stopped');
+                            }}
                         }} else {{
                             updateStatus('Saved address not responding', 'pending', 'Searching network...');
                         }}
                     }}
                     
-                    // Background discovery with status
+                    // Background discovery with health check
                     updateStatus('Searching for your Watchdog...', 'pending', '');
-                    const result = await tryApi('discover_with_status');
+                    const result = await tryApi('discover_with_health');
                     discoveryComplete = true;
                     
                     document.getElementById('spinner').style.display = 'none';
                     
                     if (result && result.found) {{
                         document.getElementById('ip').value = result.ip;
-                        updateStatus('✓ Found Watchdog at ' + result.ip, 'success', result.status || '');
-                        setTimeout(connect, 800);
+                        showHealthStatus(result.health, result.ip);
+                        
+                        if (result.health.dashboard_up) {{
+                            setTimeout(connect, 1000);
+                        }}
                     }} else {{
-                        updateStatus('Could not find Watchdog automatically', 'error', result ? result.status : 'Enter IP address manually');
+                        updateStatus('Could not find Watchdog automatically', 'error', 
+                            result ? result.discovery_message : 'Enter IP address manually');
                         document.getElementById('spinner').style.display = 'none';
                     }}
+                }}
+                
+                function showHealthStatus(health, ip) {{
+                    const healthEl = document.getElementById('health-indicator');
+                    
+                    if (health.status === 'healthy') {{
+                        updateStatus('✓ Found Watchdog at ' + ip, 'success', 
+                            health.sensors_active + ' sensors active');
+                        healthEl.innerHTML = '✅ System healthy';
+                        healthEl.style.background = 'rgba(100,255,100,0.2)';
+                    }} else if (health.status === 'degraded') {{
+                        updateStatus('⚠ Found Watchdog at ' + ip, 'warning', health.status_message);
+                        healthEl.innerHTML = '⚠️ ' + health.status_message;
+                        healthEl.style.background = 'rgba(255,200,0,0.2)';
+                    }} else if (health.daemon_running) {{
+                        updateStatus('Found Watchdog at ' + ip, 'success', 'Monitoring active');
+                        healthEl.innerHTML = '🟢 Monitoring running';
+                        healthEl.style.background = 'rgba(100,255,100,0.2)';
+                    }} else {{
+                        updateStatus('Found Watchdog at ' + ip, 'warning', 'Monitoring stopped');
+                        healthEl.innerHTML = '🔴 Monitoring stopped';
+                        healthEl.style.background = 'rgba(255,100,100,0.2)';
+                    }}
+                    
+                    // Show alarm count if any
+                    if (health.critical_alarms > 0) {{
+                        healthEl.innerHTML += ' | 🔴 ' + health.critical_alarms + ' critical';
+                    }} else if (health.active_alarms > 0) {{
+                        healthEl.innerHTML += ' | 🟡 ' + health.active_alarms + ' alerts';
+                    }}
+                    
+                    healthEl.style.display = 'block';
                 }}
                 
                 async function tryApi(method, ...args) {{
@@ -272,6 +334,9 @@ class WatchdogApp:
                         spinner.style.display = 'none';
                     }} else if (type === 'error') {{
                         statusEl.className = 'status error';
+                        spinner.style.display = 'none';
+                    }} else if (type === 'warning') {{
+                        statusEl.className = 'status warning';
                         spinner.style.display = 'none';
                     }} else {{
                         statusEl.className = 'status';
@@ -326,8 +391,8 @@ class WatchdogApp:
         self.window = webview.create_window(
             APP_NAME,
             html=self.get_setup_html(),
-            width=460,
-            height=560,
+            width=500,
+            height=620,
             resizable=False,
             js_api=api,
         )
@@ -346,6 +411,21 @@ class SetupAPI:
             return {"success": True}
         return {"success": False}
     
+    def check_health(self, ip: str) -> dict:
+        """Check health of a specific IP."""
+        health = check_watchdog_health(ip, timeout=2.0)
+        return {
+            "reachable": health.reachable,
+            "dashboard_up": health.dashboard_up,
+            "daemon_running": health.daemon_running,
+            "data_flowing": health.data_flowing,
+            "sensors_active": health.sensors_active,
+            "active_alarms": health.active_alarms,
+            "critical_alarms": health.critical_alarms,
+            "status": health.status,
+            "status_message": health.status_message,
+        }
+    
     def discover(self) -> dict:
         """Fast parallel discovery (backward compatible)."""
         ip = discover_watchdog_fast()
@@ -355,10 +435,33 @@ class SetupAPI:
     
     def discover_with_status(self) -> dict:
         """Discovery with detailed status for better UI feedback."""
-        # First try fast mDNS
         ip, status = discover_watchdog_with_status()
         if ip:
             return {"found": True, "ip": ip, "status": status}
+        return {"found": False, "ip": None, "status": status}
+    
+    def discover_with_health(self) -> dict:
+        """Discovery with health check - the full experience."""
+        # First try fast mDNS
+        ip, health, discovery_msg = discover_and_check_health()
+        
+        if ip:
+            return {
+                "found": True,
+                "ip": ip,
+                "discovery_message": discovery_msg,
+                "health": {
+                    "reachable": health.reachable,
+                    "dashboard_up": health.dashboard_up,
+                    "daemon_running": health.daemon_running,
+                    "data_flowing": health.data_flowing,
+                    "sensors_active": health.sensors_active,
+                    "active_alarms": health.active_alarms,
+                    "critical_alarms": health.critical_alarms,
+                    "status": health.status,
+                    "status_message": health.status_message,
+                }
+            }
         
         # Fall back to parallel scan of common IPs
         common_ips = [
@@ -369,31 +472,53 @@ class SetupAPI:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(verify_connection, ip, 8501, 0.8): ip 
+                executor.submit(check_watchdog_health, ip, 1.0): ip 
                 for ip in common_ips
             }
             try:
-                for future in concurrent.futures.as_completed(futures, timeout=2):
+                for future in concurrent.futures.as_completed(futures, timeout=3):
                     ip = futures[future]
                     try:
-                        if future.result():
-                            return {"found": True, "ip": ip, "status": "Found via network scan"}
+                        health = future.result()
+                        if health.reachable:
+                            return {
+                                "found": True,
+                                "ip": ip,
+                                "discovery_message": "Found via network scan",
+                                "health": {
+                                    "reachable": health.reachable,
+                                    "dashboard_up": health.dashboard_up,
+                                    "daemon_running": health.daemon_running,
+                                    "data_flowing": health.data_flowing,
+                                    "sensors_active": health.sensors_active,
+                                    "active_alarms": health.active_alarms,
+                                    "critical_alarms": health.critical_alarms,
+                                    "status": health.status,
+                                    "status_message": health.status_message,
+                                }
+                            }
                     except Exception:
                         pass
             except concurrent.futures.TimeoutError:
                 pass
         
-        return {"found": False, "ip": None, "status": status}
+        return {"found": False, "ip": None, "discovery_message": discovery_msg, "health": None}
     
     def connect(self, ip: str) -> dict:
         """Connect and launch dashboard."""
-        if verify_connection(ip, port=8501, timeout=2.0):
+        health = check_watchdog_health(ip, timeout=2.0)
+        
+        if health.dashboard_up:
             self.app.config.set("watchdog_ip", ip)
+            self.app._current_ip = ip
             self.app.window.load_url(f"http://{ip}:8501")
             self.app.window.resize(1200, 800)
             self.app.window.set_title(APP_NAME)
             return {"success": True}
-        return {"success": False, "error": "Dashboard not responding"}
+        elif health.reachable:
+            return {"success": False, "error": "Pi reachable but dashboard not running. Check the monitoring service."}
+        else:
+            return {"success": False, "error": "Dashboard not responding"}
     
     def quit(self):
         """Exit application."""

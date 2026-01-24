@@ -1,11 +1,36 @@
 #!/usr/bin/env python3
-"""Network discovery for Watchdog devices - optimized for speed with cross-platform support."""
+"""Network discovery for Watchdog devices - with health check support."""
+import json
 import socket
 import subprocess
 import sys
 import urllib.request
 import urllib.error
 from typing import Optional, Tuple
+from dataclasses import dataclass
+
+
+@dataclass
+class WatchdogHealth:
+    """Health status of a discovered Watchdog device."""
+    reachable: bool
+    dashboard_up: bool
+    daemon_running: bool
+    data_flowing: bool
+    sensors_active: int
+    active_alarms: int
+    critical_alarms: int
+    status: str  # "healthy", "degraded", "unhealthy", "offline"
+    status_message: str
+    last_reading_age_seconds: Optional[float]
+    
+    @property
+    def is_healthy(self) -> bool:
+        return self.status == "healthy"
+    
+    @property
+    def needs_attention(self) -> bool:
+        return self.status in ("degraded", "unhealthy") or self.critical_alarms > 0
 
 
 def verify_connection(ip: str, port: int = 8501, timeout: float = 1.0) -> bool:
@@ -27,6 +52,68 @@ def verify_connection(ip: str, port: int = 8501, timeout: float = 1.0) -> bool:
             return True
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
         return False
+
+
+def check_watchdog_health(ip: str, timeout: float = 2.0) -> WatchdogHealth:
+    """
+    Check the health of a Watchdog device.
+    
+    Queries the health endpoint (port 8502) to get detailed status.
+    Falls back to basic dashboard check if health endpoint unavailable.
+    
+    Args:
+        ip: IP address of the Watchdog Pi
+        timeout: Request timeout in seconds
+    
+    Returns:
+        WatchdogHealth with detailed status
+    """
+    # Default unhealthy state
+    health = WatchdogHealth(
+        reachable=False,
+        dashboard_up=False,
+        daemon_running=False,
+        data_flowing=False,
+        sensors_active=0,
+        active_alarms=0,
+        critical_alarms=0,
+        status="offline",
+        status_message="Cannot reach device",
+        last_reading_age_seconds=None,
+    )
+    
+    # Try dedicated health endpoint first (port 8502)
+    health_url = f"http://{ip}:8502/health"
+    try:
+        req = urllib.request.Request(health_url, headers={"User-Agent": "watchdog-desktop"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                data = json.loads(resp.read().decode())
+                health.reachable = True
+                health.daemon_running = data.get("daemon_running", False)
+                health.data_flowing = data.get("data_flowing", False)
+                health.sensors_active = data.get("sensors_active", 0)
+                health.active_alarms = data.get("active_alarms", 0)
+                health.critical_alarms = data.get("critical_alarms", 0)
+                health.status = data.get("status", "unknown")
+                health.status_message = data.get("status_message", "")
+                health.last_reading_age_seconds = data.get("reading_age_seconds")
+                
+                # Also check dashboard
+                health.dashboard_up = verify_connection(ip, 8501, timeout=1.0)
+                return health
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+        pass
+    
+    # Fallback: just check if dashboard is up
+    health.dashboard_up = verify_connection(ip, 8501, timeout=timeout)
+    
+    if health.dashboard_up:
+        health.reachable = True
+        health.status = "unknown"
+        health.status_message = "Dashboard reachable, health endpoint unavailable"
+    
+    return health
 
 
 def discover_watchdog_fast() -> Optional[str]:
@@ -108,6 +195,27 @@ def discover_watchdog_with_status() -> Tuple[Optional[str], str]:
         return None, f"mDNS discovery timed out on {platform_name}"
     except Exception as e:
         return None, f"mDNS error on {platform_name}: {e}"
+
+
+def discover_and_check_health() -> Tuple[Optional[str], WatchdogHealth, str]:
+    """
+    Discover Watchdog and check its health status.
+    
+    Returns:
+        Tuple of (ip_or_none, health_status, discovery_message)
+    """
+    ip, discovery_msg = discover_watchdog_with_status()
+    
+    if ip is None:
+        return None, WatchdogHealth(
+            reachable=False, dashboard_up=False, daemon_running=False,
+            data_flowing=False, sensors_active=0, active_alarms=0,
+            critical_alarms=0, status="offline",
+            status_message="Device not found", last_reading_age_seconds=None
+        ), discovery_msg
+    
+    health = check_watchdog_health(ip)
+    return ip, health, discovery_msg
 
 
 def _discover_macos_fast() -> Optional[str]:
@@ -277,43 +385,67 @@ Discovery Help:
 """
 
 
+def format_health_for_display(health: WatchdogHealth) -> str:
+    """Format health status for UI display."""
+    if not health.reachable:
+        return "❌ Device not reachable"
+    
+    parts = []
+    
+    # Status icon
+    if health.status == "healthy":
+        parts.append("✅")
+    elif health.status == "degraded":
+        parts.append("⚠️")
+    elif health.status == "unhealthy":
+        parts.append("❌")
+    else:
+        parts.append("❓")
+    
+    # Main status
+    if health.daemon_running and health.data_flowing:
+        parts.append(f"Monitoring active ({health.sensors_active} sensors)")
+    elif health.daemon_running:
+        parts.append("Monitoring active, no recent data")
+    elif health.dashboard_up:
+        parts.append("Dashboard up, monitoring stopped")
+    else:
+        parts.append(health.status_message)
+    
+    # Alarms
+    if health.critical_alarms > 0:
+        parts.append(f"| 🔴 {health.critical_alarms} critical")
+    elif health.active_alarms > 0:
+        parts.append(f"| 🟡 {health.active_alarms} alerts")
+    
+    return " ".join(parts)
+
+
 if __name__ == "__main__":
     import time
     
-    print("Testing discovery with status...")
+    print("Testing discovery with health check...")
     print(f"Platform: {sys.platform}")
     print()
     
     start = time.time()
-    ip, status = discover_watchdog_with_status()
+    ip, health, status = discover_and_check_health()
     elapsed = time.time() - start
     
     if ip:
         print(f"✓ Found: {ip}")
-        print(f"  Status: {status}")
+        print(f"  Discovery: {status}")
+        print(f"  Health: {format_health_for_display(health)}")
+        print(f"  Details:")
+        print(f"    Dashboard up: {health.dashboard_up}")
+        print(f"    Daemon running: {health.daemon_running}")
+        print(f"    Data flowing: {health.data_flowing}")
+        print(f"    Sensors: {health.sensors_active}")
+        print(f"    Alarms: {health.active_alarms} ({health.critical_alarms} critical)")
     else:
         print(f"✗ Not found")
         print(f"  Status: {status}")
     print(f"  Time: {elapsed:.2f}s")
-    
-    print()
-    print("Testing fast discovery...")
-    start = time.time()
-    ip = discover_watchdog_fast()
-    elapsed = time.time() - start
-    
-    if ip:
-        print(f"✓ Found: {ip} ({elapsed:.2f}s)")
-    else:
-        print(f"✗ Not found ({elapsed:.2f}s)")
-    
-    print()
-    print("Testing direct connection...")
-    test_ip = "192.168.0.21"
-    start = time.time()
-    result = verify_connection(test_ip, timeout=0.5)
-    elapsed = time.time() - start
-    print(f"{test_ip}: {'reachable' if result else 'not reachable'} ({elapsed:.2f}s)")
     
     print()
     print("Help text:")

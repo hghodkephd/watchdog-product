@@ -1,0 +1,28 @@
+[Unit]
+Description=Watchdog Health Check HTTP Endpoint
+After=watchdog-monitor.service
+Wants=watchdog-monitor.service
+
+[Service]
+Type=simple
+User=__WATCHDOG_USER__
+Group=__WATCHDOG_GROUP__
+WorkingDirectory=__WATCHDOG_DIR__
+ExecStart=__WATCHDOG_DIR__/venv/bin/python health_check.py --serve --port 8502
+
+Restart=always
+RestartSec=10s
+
+Environment=PYTHONUNBUFFERED=1
+
+# Lightweight service
+MemoryMax=64M
+Nice=5
+
+StandardOutput=journal
+StandardError=journal
+
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

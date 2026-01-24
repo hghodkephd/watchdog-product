@@ -8,6 +8,7 @@ This module wraps the validated OSS BLE scanner and adds production features:
 - Self-healing watchdog thread
 - Automatic recovery from Bluetooth failures
 - Data persistence to SQLite
+- BACKGROUND ALERT ENGINE (runs 24/7, independent of dashboard)
 """
 
 import sys
@@ -35,6 +36,9 @@ from ble_scanner import (
 from config import AppConfig, load_config
 from storage import Reading, DatabaseWriter, get_db_path
 
+# Import the background alert engine
+from alert_engine import start_alert_engine, stop_alert_engine, get_alert_engine
+
 _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
@@ -52,11 +56,13 @@ class WatchdogMonitor:
     - Database persistence
     - Watchdog monitoring thread
     - Automatic failure recovery
+    - BACKGROUND ALERT ENGINE (24/7 notifications)
     """
     
     def __init__(self):
         self.cfg = load_config()
         self.db_writer = None  # initialized in start()
+        self.alert_engine = None  # initialized in start()
         self.scanner_thread = None
         self.watchdog_thread = None
         self.running = False
@@ -218,7 +224,7 @@ class WatchdogMonitor:
         _log_core.info("Watchdog thread exiting (self.running=%s)", self.running)
     
     def start(self):
-        """Start the monitoring system with watchdog."""
+        """Start the monitoring system with watchdog and alert engine."""
         _log_core.info("=" * 60)
         _log_core.info("Starting Watchdog Environmental Monitor")
         _log_core.info("PID: %d", os.getpid())
@@ -243,6 +249,18 @@ class WatchdogMonitor:
 
         self.running = True
         self._shutdown_reason = None
+        
+        # === START BACKGROUND ALERT ENGINE ===
+        # This is the key fix: alerts run 24/7 in the daemon, not in the dashboard
+        _log_core.info("Starting background alert engine...")
+        self.alert_engine = start_alert_engine(
+            db_path=get_db_path(),
+            config_loader=load_config,  # Reload config each check for live updates
+            check_interval_seconds=60,  # Check alerts every 60 seconds
+            heartbeat_interval_seconds=300,  # Heartbeat every 5 minutes
+        )
+        _log_core.info("Alert engine started (checking every 60s)")
+        print("[watchdog] Alert engine started - notifications will work 24/7", file=sys.stderr, flush=True)
         
         # Wait for BLE adapter before starting scanner
         if not self._wait_for_ble_adapter():
@@ -356,6 +374,16 @@ class WatchdogMonitor:
         
         self.running = False
         
+        # Stop alert engine first (cleanly finish any pending notifications)
+        try:
+            if self.alert_engine is not None:
+                _log_core.info("Stopping alert engine...")
+                stop_alert_engine()
+                self.alert_engine = None
+                _log_core.info("Alert engine stopped")
+        except Exception:
+            _log_core.exception("Error stopping alert engine")
+        
         # Stop OSS scanner (thread-safe stop event)
         try:
             stop_scanner()
@@ -406,9 +434,3 @@ def main():
 if __name__ == "__main__":
     main()
     _log_core.error("MAIN FUNCTION EXITED — THIS SHOULD NEVER HAPPEN")
-    
-    
-    
-    
-    
-    

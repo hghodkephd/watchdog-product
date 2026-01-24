@@ -2,15 +2,26 @@
 # -*- coding: utf-8 -*-
 """
 Alarm UI components for Streamlit dashboard.
+
+UPDATED: Now reads from SQLite-backed persistent alarm store.
+The dashboard is READ-ONLY for alarm detection - it just displays what the
+background daemon has determined. Silencing/unsilencing writes to DB.
 """
 
 import streamlit as st
 import time
 from datetime import datetime
+from typing import Optional
 
-from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPTIONS
-from notifications import SUGGESTED_ACTIONS, send_test_email, send_alarm_email, send_cleared_email
+from storage import get_db_path
+from alert_engine import PersistentAlarmStore, Severity, AlarmRecord
+from notifications import SUGGESTED_ACTIONS, send_test_email
 from config import EmailConfig
+
+
+def get_alarm_store() -> PersistentAlarmStore:
+    """Get the alarm store connected to the main database."""
+    return PersistentAlarmStore(get_db_path())
 
 
 # =============================================================================
@@ -22,10 +33,14 @@ def render_alarm_banners(cfg):
     """
     Render persistent alarm banners at top of Monitoring tab.
     
+    Reads from SQLite-backed alarm store (populated by daemon's AlertEngine).
     Shows all visible alarms with silence controls.
     """
-    manager = get_alarm_manager()
-    visible_alarms = manager.get_all_visible()
+    store = get_alarm_store()
+    
+    # Get alarms that should be displayed
+    # (active and not silenced, or escalated past silence level)
+    visible_alarms = store.get_all_visible()
     
     if not visible_alarms:
         return
@@ -36,151 +51,131 @@ def render_alarm_banners(cfg):
     st.markdown("### ⚠️ Active Alerts")
     
     for alarm in visible_alarms:
-        # Determine styling
-        if alarm.severity == Severity.CRITICAL:
-            icon = "🔴"
-            color = "#dc2626"
-            bg_color = "#fee2e2"
-            label = "CRITICAL"
-        else:
-            icon = "🟡"
-            color = "#d97706"
-            bg_color = "#fef3c7"
-            label = "WARNING"
-        
-        # Format duration
-        dur_sec = alarm.duration_seconds
-        if dur_sec >= 3600:
-            dur_str = f"{int(dur_sec // 3600)}h {int((dur_sec % 3600) // 60)}m"
-        elif dur_sec >= 60:
-            dur_str = f"{int(dur_sec // 60)}m"
-        else:
-            dur_str = f"{int(dur_sec)}s"
-        
-        # Get suggested action
-        action = SUGGESTED_ACTIONS.get(alarm.alert_type, "Check the sensor.")
-        
-        # Render banner
-        with st.container():
-            st.markdown(
-                f"""
-                <div style="
-                    background: {bg_color};
-                    border-left: 4px solid {color};
-                    padding: 12px 16px;
-                    border-radius: 4px;
-                    margin-bottom: 8px;
-                ">
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                        <div>
-                            <strong style="color: {color};">{icon} {label}</strong>
-                            <span style="color: #666; font-size: 12px; margin-left: 8px;">
-                                Active for {dur_str}
-                            </span>
-                            <br>
-                            <strong>{alarm.sensor_name}</strong>: {alarm.message}
-                            <br>
-                            <span style="color: #666; font-size: 13px;">
-                                💡 {action}
-                            </span>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            
-            # Silence controls
-            if not alarm.is_silenced:
-                col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
-                with col1:
-                    if st.button("🔕 15m", key=f"silence_15m_{alarm.key}", use_container_width=True):
-                        manager.silence(alarm.sensor_id, alarm.alert_type, "15min")
-                        st.rerun()
-                with col2:
-                    if st.button("🔕 1h", key=f"silence_1h_{alarm.key}", use_container_width=True):
-                        manager.silence(alarm.sensor_id, alarm.alert_type, "1hour")
-                        st.rerun()
-                with col3:
-                    if st.button("🔕 Until clear", key=f"silence_clear_{alarm.key}", use_container_width=True):
-                        manager.silence(alarm.sensor_id, alarm.alert_type, "until_resolved")
-                        st.rerun()
-            else:
-                # Show silenced status with unsilence option
-                silence_info = "Silenced"
-                if alarm.silenced_until != float('inf'):
-                    remaining = int(alarm.silenced_until - time.time())
-                    if remaining > 0:
-                        if remaining >= 3600:
-                            silence_info = f"Silenced ({remaining // 3600}h {(remaining % 3600) // 60}m left)"
-                        else:
-                            silence_info = f"Silenced ({remaining // 60}m left)"
-                else:
-                    silence_info = "Silenced until resolved"
-                
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.caption(f"🔇 {silence_info}")
-                with col2:
-                    if st.button("🔔 Unsilence", key=f"unsilence_{alarm.key}", use_container_width=True):
-                        manager.unsilence(alarm.sensor_id, alarm.alert_type)
-                        st.rerun()
+        _render_single_alarm_banner(alarm, store)
     
     st.divider()
 
 
+def _render_single_alarm_banner(alarm: AlarmRecord, store: PersistentAlarmStore):
+    """Render a single alarm banner with controls."""
+    # Determine styling
+    if alarm.severity == Severity.CRITICAL:
+        icon = "🔴"
+        color = "#dc2626"
+        bg_color = "#fee2e2"
+        label = "CRITICAL"
+    else:
+        icon = "🟡"
+        color = "#d97706"
+        bg_color = "#fef3c7"
+        label = "WARNING"
+    
+    # Format duration
+    dur_sec = alarm.duration_seconds
+    if dur_sec >= 3600:
+        dur_str = f"{int(dur_sec // 3600)}h {int((dur_sec % 3600) // 60)}m"
+    elif dur_sec >= 60:
+        dur_str = f"{int(dur_sec // 60)}m"
+    else:
+        dur_str = f"{int(dur_sec)}s"
+    
+    # Get suggested action
+    action = SUGGESTED_ACTIONS.get(alarm.alert_type, "Check the sensor.")
+    
+    # Render banner
+    with st.container():
+        st.markdown(
+            f"""
+            <div style="
+                background: {bg_color};
+                border-left: 4px solid {color};
+                padding: 12px 16px;
+                border-radius: 4px;
+                margin-bottom: 8px;
+            ">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <div>
+                        <strong style="color: {color};">{icon} {label}</strong>
+                        <span style="color: #666; font-size: 12px; margin-left: 8px;">
+                            Active for {dur_str}
+                        </span>
+                        <br>
+                        <strong>{alarm.sensor_name}</strong>: {alarm.message}
+                        <br>
+                        <span style="color: #666; font-size: 13px;">
+                            💡 {action}
+                        </span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        # Silence controls
+        if not alarm.is_silenced:
+            col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+            with col1:
+                if st.button("🔕 15m", key=f"silence_15m_{alarm.alarm_key}", use_container_width=True):
+                    store.silence_alarm(alarm.sensor_id, alarm.alert_type, 15 * 60)
+                    st.rerun()
+            with col2:
+                if st.button("🔕 1h", key=f"silence_1h_{alarm.alarm_key}", use_container_width=True):
+                    store.silence_alarm(alarm.sensor_id, alarm.alert_type, 60 * 60)
+                    st.rerun()
+            with col3:
+                if st.button("🔕 Until clear", key=f"silence_clear_{alarm.alarm_key}", use_container_width=True):
+                    store.silence_alarm(alarm.sensor_id, alarm.alert_type, float('inf'))
+                    st.rerun()
+        else:
+            # Show silenced status with unsilence option
+            silence_info = "Silenced"
+            if alarm.silenced_until != float('inf'):
+                remaining = int(alarm.silenced_until - time.time())
+                if remaining > 0:
+                    if remaining >= 3600:
+                        silence_info = f"Silenced ({remaining // 3600}h {(remaining % 3600) // 60}m left)"
+                    else:
+                        silence_info = f"Silenced ({remaining // 60}m left)"
+            else:
+                silence_info = "Silenced until resolved"
+            
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.caption(f"🔇 {silence_info}")
+            with col2:
+                if st.button("🔔 Unsilence", key=f"unsilence_{alarm.alarm_key}", use_container_width=True):
+                    store.unsilence_alarm(alarm.sensor_id, alarm.alert_type)
+                    st.rerun()
+
+
 # =============================================================================
-# 2. PROCESS ALERTS AND SEND NOTIFICATIONS
-#    Call this after check_alerts() in the Monitoring tab
+# 2. ALERT SUMMARY (for use elsewhere in dashboard)
 # =============================================================================
 
-def process_alerts_and_notify(alerts, cfg, email_config):
-    """
-    Process alerts through alarm state manager and send notifications.
+def get_alarm_counts() -> dict:
+    """Get summary counts of alarms for display."""
+    store = get_alarm_store()
+    active = store.get_all_active()
     
-    Call this after check_alerts() returns alerts:
+    return {
+        "total": len(active),
+        "critical": sum(1 for a in active if a.severity == Severity.CRITICAL),
+        "warning": sum(1 for a in active if a.severity == Severity.WARNING),
+        "silenced": sum(1 for a in active if a.is_silenced),
+    }
+
+
+def render_alarm_summary_badge():
+    """Render a compact alarm summary badge."""
+    counts = get_alarm_counts()
     
-        alerts = check_alerts(df_latest, cfg)
-        process_alerts_and_notify(alerts, cfg, email_config)
-    """
-    manager = get_alarm_manager()
-    
-    # Process alerts into alarm states
-    updated, new_alarms, escalated = process_alerts(alerts)
-    
-    # Send email notifications if configured
-    if email_config and email_config.is_configured():
-        rate_limit_sec = email_config.rate_limit_minutes * 60
-        
-        # Notify on new alarms
-        for alarm in new_alarms:
-            if manager.should_notify(alarm.sensor_id, alarm.alert_type, rate_limit_sec):
-                success, msg = send_alarm_email(
-                    config=email_config,
-                    sensor_name=alarm.sensor_name,
-                    sensor_id=alarm.sensor_id,
-                    severity=alarm.severity.name.lower(),
-                    alert_type=alarm.alert_type,
-                    message=alarm.message,
-                )
-                if success:
-                    manager.mark_notified(alarm.sensor_id, alarm.alert_type)
-        
-        # Notify on escalations
-        for alarm in escalated:
-            if manager.should_notify(alarm.sensor_id, alarm.alert_type, rate_limit_sec):
-                success, msg = send_alarm_email(
-                    config=email_config,
-                    sensor_name=alarm.sensor_name,
-                    sensor_id=alarm.sensor_id,
-                    severity=alarm.severity.name.lower(),
-                    alert_type=alarm.alert_type,
-                    message=f"ESCALATED: {alarm.message}",
-                )
-                if success:
-                    manager.mark_notified(alarm.sensor_id, alarm.alert_type)
-    
-    return updated, new_alarms, escalated
+    if counts["total"] == 0:
+        st.success("✅ No active alerts")
+    elif counts["critical"] > 0:
+        st.error(f"🔴 {counts['critical']} critical, {counts['warning']} warning")
+    else:
+        st.warning(f"🟡 {counts['warning']} warning alert(s)")
 
 
 # =============================================================================
@@ -188,7 +183,7 @@ def process_alerts_and_notify(alerts, cfg, email_config):
 #    Add this to the Settings tab (tab3), after alert configuration
 # =============================================================================
 
-def render_email_settings(email_config):
+def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[EmailConfig]:
     """
     Render email notification settings UI.
     
@@ -198,7 +193,8 @@ def render_email_settings(email_config):
     
     st.info(
         "Get email alerts when sensors exceed thresholds. "
-        "Emails are rate-limited to prevent spam."
+        "Notifications are sent by the background monitoring service, "
+        "**even when the dashboard is closed**."
     )
     
     # Use provided config or create default
@@ -327,3 +323,60 @@ def render_email_settings(email_config):
     
     # Return updated config
     return test_config
+
+
+# =============================================================================
+# 4. NOTIFICATION LOG VIEWER (optional, for debugging)
+# =============================================================================
+
+def render_notification_log(limit: int = 20):
+    """Render recent notification log for debugging."""
+    import sqlite3
+    from storage import get_db_path
+    
+    st.subheader("📬 Recent Notifications")
+    
+    try:
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        
+        rows = conn.execute("""
+            SELECT alarm_key, notification_type, sent_ts, success, error_message
+            FROM alert_notifications
+            ORDER BY sent_ts DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        
+        conn.close()
+        
+        if not rows:
+            st.caption("No notifications sent yet.")
+            return
+        
+        for row in rows:
+            ts = datetime.fromtimestamp(row['sent_ts']).strftime("%Y-%m-%d %H:%M:%S")
+            success = row['success']
+            icon = "✅" if success else "❌"
+            
+            st.text(f"{icon} [{ts}] {row['notification_type']}: {row['alarm_key']}")
+            if not success and row['error_message']:
+                st.caption(f"   Error: {row['error_message']}")
+    
+    except Exception as e:
+        st.error(f"Could not load notification log: {e}")
+
+
+# =============================================================================
+# DEPRECATED: process_alerts_and_notify
+# =============================================================================
+
+def process_alerts_and_notify(alerts, cfg, email_config):
+    """
+    DEPRECATED: Alert processing now happens in the background daemon.
+    
+    This function is kept for backward compatibility but does nothing.
+    The AlertEngine in ble_watchdog.py handles all alert processing and
+    notification sending 24/7, regardless of dashboard state.
+    """
+    # No-op - alerts are processed by the daemon's AlertEngine
+    pass
