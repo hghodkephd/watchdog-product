@@ -828,13 +828,23 @@ def get_alert_engine() -> Optional[AlertEngine]:
     return _engine
 
 
-def start_alert_engine(db_path: Path, config_loader: Callable) -> AlertEngine:
+def start_alert_engine(
+    db_path: Path,
+    config_loader: Callable,
+    check_interval_seconds: int = 60,
+    heartbeat_interval_seconds: int = 300,
+) -> AlertEngine:
     """Start the global alert engine."""
     global _engine
     if _engine is not None:
         _engine.stop()
-    
-    _engine = AlertEngine(db_path, config_loader)
+
+    _engine = AlertEngine(
+        db_path=db_path,
+        config_loader=config_loader,
+        check_interval_seconds=check_interval_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
     _engine.start()
     return _engine
 
