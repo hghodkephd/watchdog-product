@@ -125,7 +125,7 @@ def check_alerts(df_latest: pd.DataFrame, cfg: AppConfig) -> List[Alert]:
                     sensor_id=sensor_id,
                     sensor_name=sensor_name,
                     alert_type="temp_low",
-                    message=f"Temperature too low: {temp_display:.1f}{unit} (min: {min_display:.1f}{unit})",
+                    message=f"{sensor_name} Temperature too low: {temp_display:.1f}{unit} (min: {min_display:.1f}{unit})",
                     severity="warning",
                     timestamp=now,
                 ))
