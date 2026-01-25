@@ -229,6 +229,20 @@ with tab1:
         db_ok = bool(health.get("db_ok", False))
         st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
 
+# Check for dropped readings
+    try:
+        from storage import get_dropped_readings_count, get_connection
+        conn = get_connection()
+        dropped_count = get_dropped_readings_count(conn)
+        conn.close()
+        if dropped_count > 0:
+            st.warning(
+                f"⚠️ **{dropped_count} readings have been dropped** due to database backlog. "
+                "Consider archiving old data in Settings → Data Management."
+            )
+    except Exception:
+        pass  # Don't let this break the dashboard
+
     # Optional: compact “what to do” hints only when red
     if not is_running:
         st.info("Monitor is stopped. Use **Start monitoring** below.")

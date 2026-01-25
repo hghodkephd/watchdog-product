@@ -336,16 +336,27 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
     # Test email button
     st.markdown("---")
     
+    # For test_config, we need to handle the password correctly:
+    # - If user entered a new password, use that for testing
+    # - Otherwise, use the existing marker so get_actual_password() retrieves from keyring
+    if new_password:
+        test_password = new_password
+    else:
+        test_password = email_config.sender_password  # Will be "__KEYRING__" if migrated
+    
     test_config = EmailConfig(
         enabled=True,
         recipient=recipient,
         smtp_server=smtp_server,
         smtp_port=int(smtp_port),
         sender_email=sender_email,
-        sender_password=sender_password,
+        sender_password=test_password,
         rate_limit_minutes=rate_limit,
         notify_on_clear=notify_on_clear,
     )
+    
+    # Determine if we have a usable password (new entry or existing in keyring)
+    has_password = bool(new_password) or bool(email_config.get_actual_password())
     
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -367,7 +378,7 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
                 missing.append("recipient")
             if not sender_email:
                 missing.append("sender email")
-            if not sender_password:
+            if not has_password:
                 missing.append("password")
             st.caption(f"Missing: {', '.join(missing)}")
     

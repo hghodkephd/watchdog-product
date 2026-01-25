@@ -391,17 +391,17 @@ class DatabaseWriter:
             except Exception:
                 pass
 
-def get_stats(self) -> dict:
-        """Get writer statistics for monitoring."""
-        return {
-            "total_writes": self.total_writes,
-            "total_batches": self.total_batches,
-            "errors": self.errors,
-            "dropped_readings": self.dropped_readings,
-            "queue_size": self._queue.qsize(),
-            "queue_max": self._queue.maxsize,
-            "is_alive": self.is_alive(),
-        }
+    def get_stats(self) -> dict:
+            """Get writer statistics for monitoring."""
+            return {
+                "total_writes": self.total_writes,
+                "total_batches": self.total_batches,
+                "errors": self.errors,
+                "dropped_readings": self.dropped_readings,
+                "queue_size": self._queue.qsize(),
+                "queue_max": self._queue.maxsize,
+                "is_alive": self.is_alive(),
+            }
     
 # ---------------------------------------------------------------------
 # Database statistics

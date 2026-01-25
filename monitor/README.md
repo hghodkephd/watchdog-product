@@ -311,7 +311,9 @@ journalctl -u watchdog-monitor -f
 sudo systemctl status watchdog-monitor
 
 # Check logs
-tail -f ~/.watchdog/logs/monitor.log
+tail -f ~/Watchdog/monitor/data/logs/watchdog.log
+
+
 
 # Restart service
 sudo systemctl restart watchdog-monitor
@@ -332,7 +334,8 @@ sudo systemctl restart watchdog-monitor
 cat ~/.config/watchdog/config.json | grep watchdog_enabled
 
 # Check logs for restart events
-grep "Requesting scanner restart" ~/.watchdog/logs/monitor.log
+grep "Requesting scanner restart" ~/Watchdog/monitor/data/logs/watchdog.log
+
 ```
 
 ---
@@ -441,7 +444,7 @@ watchdog-monitor/
 
 For issues or questions:
 - Check troubleshooting section above
-- Review logs in `~/.watchdog/logs/`
+- Review logs in `~/Watchdog/monitor/data/logs/`
 - Check systemd service status
 
 ---
