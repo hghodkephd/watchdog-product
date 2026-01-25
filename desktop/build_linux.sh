@@ -25,7 +25,7 @@ cd "$SCRIPT_DIR"
 
 APP_NAME="Watchdog"
 APP_NAME_LOWER="watchdog"
-APP_VERSION="1.0.0"
+APP_VERSION="1.0.1"
 OUTPUT_DIR="$SCRIPT_DIR/../releases/desktop/linux"
 VENV_DIR="$SCRIPT_DIR/.build-venv"
 
