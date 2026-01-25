@@ -43,3 +43,9 @@ Thumbs.db
 # Streamlit
 # =========================
 .streamlit/
+
+# Build outputs / local artifacts
+desktop/releases/
+desktop/Validation/
+desktop/__pycache__/
+desktop/.build-venv/
