@@ -12,10 +12,14 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from platformdirs import user_config_dir
+import keyring
 
 APP_NAME = "watchdog"
 APP_AUTHOR = "watchdog-env-monitor"
 
+# Keyring service name for Watchdog
+KEYRING_SERVICE = "watchdog-monitor"
+KEYRING_EMAIL_KEY = "email_sender_password"
 
 # Bump this when config schema changes
 CONFIG_VERSION = 1
@@ -72,19 +76,37 @@ class EmailConfig:
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
     sender_email: str = ""
-    sender_password: str = ""
+    sender_password: str = ""  # Stores "__KEYRING__" marker, actual password in OS keyring
     rate_limit_minutes: int = 30
     notify_on_clear: bool = True
+    
+    # Circuit breaker state (not persisted to config, managed by alert engine)
+    consecutive_failures: int = 0
+    email_disabled_due_to_errors: bool = False
+    last_error_message: str = ""
 
     def is_configured(self) -> bool:
         """Check if email is fully configured and ready to send."""
-        return bool(
-            self.enabled and
-            self.recipient and
-            self.sender_email and
-            self.sender_password
-        )
-
+        if not (self.enabled and self.recipient and self.sender_email):
+            return False
+        # Check keyring for password
+        actual_password = self.get_actual_password()
+        return bool(actual_password)
+    
+    def get_actual_password(self) -> str:
+        """Get the actual password (from keyring if migrated, or from config for legacy)."""
+        if self.sender_password == "__KEYRING__":
+            return get_email_password()
+        return self.sender_password
+    
+    def set_password(self, password: str) -> bool:
+        """Set password securely in keyring."""
+        if set_email_password(password):
+            self.sender_password = "__KEYRING__"
+            return True
+        # Fallback to config storage (less secure)
+        self.sender_password = password
+        return True
 
 # ------------------------
 # Archive configuration
@@ -209,9 +231,12 @@ class AppConfig:
         else:
             raw["alerts"] = AlertConfig()
 
-        # email (backward compatible)
+        # email (backward compatible + migration)
         email_raw = raw.get("email")
         if email_raw:
+            # Check for plaintext password migration
+            migrate_plaintext_password(raw)
+            email_raw = raw.get("email")  # Re-fetch after potential migration
             raw["email"] = EmailConfig(**email_raw)
         else:
             raw["email"] = EmailConfig()
@@ -339,11 +364,15 @@ def load_config() -> AppConfig:
 
 
 def save_config(cfg: AppConfig) -> None:
+    """Save config with alarm cleanup for removed sensors."""
     cfg_path = get_config_path()
 
     is_valid, errors = validate_config(cfg)
     if not is_valid:
         raise ValueError("Invalid config: " + "; ".join(errors))
+
+    # Clean up orphaned alarms for sensors that were removed
+    _cleanup_orphaned_alarms(cfg)
 
     tmp_path = cfg_path.with_suffix(cfg_path.suffix + ".tmp")
     try:
@@ -356,3 +385,80 @@ def save_config(cfg: AppConfig) -> None:
         except Exception:
             pass
         raise
+
+
+def _cleanup_orphaned_alarms(cfg: AppConfig) -> None:
+    """Clear alarms for sensors no longer in config."""
+    try:
+        from storage import get_db_path
+        from alert_engine import PersistentAlarmStore, Severity
+        
+        store = PersistentAlarmStore(get_db_path())
+        active_alarms = store.get_all_active()
+        configured_sensors = set(cfg.sensors.keys()) if cfg.sensors else set()
+        
+        # Also keep system alarms
+        configured_sensors.add("SYSTEM")
+        
+        for alarm in active_alarms:
+            if alarm.sensor_id not in configured_sensors:
+                # Sensor was removed from config - clear the alarm
+                store.upsert_alarm(
+                    sensor_id=alarm.sensor_id,
+                    alert_type=alarm.alert_type,
+                    sensor_name=alarm.sensor_name,
+                    severity=Severity.NONE,
+                    message="",
+                )
+                _log().info("Cleared orphaned alarm for removed sensor: %s", alarm.sensor_id)
+    except Exception as e:
+        _log().warning("Could not cleanup orphaned alarms: %s", e)
+        
+        
+        
+def get_email_password() -> str:
+    """Retrieve email password from OS keyring."""
+    try:
+        password = keyring.get_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
+        return password or ""
+    except Exception as e:
+        _log().warning("Could not retrieve email password from keyring: %s", e)
+        return ""
+
+
+def set_email_password(password: str) -> bool:
+    """Store email password in OS keyring."""
+    try:
+        if password:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY, password)
+        else:
+            # Delete if empty
+            try:
+                keyring.delete_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
+            except keyring.errors.PasswordDeleteError:
+                pass  # Already deleted
+        return True
+    except Exception as e:
+        _log().error("Could not store email password in keyring: %s", e)
+        return False
+
+
+def migrate_plaintext_password(cfg_data: dict) -> bool:
+    """
+    Migrate plaintext password from config to keyring.
+    Returns True if migration occurred.
+    """
+    email_data = cfg_data.get("email", {})
+    plaintext_pw = email_data.get("sender_password", "")
+    
+    if plaintext_pw and plaintext_pw != "__KEYRING__":
+        # Migrate to keyring
+        if set_email_password(plaintext_pw):
+            # Mark as migrated (don't store actual password)
+            email_data["sender_password"] = "__KEYRING__"
+            cfg_data["email"] = email_data
+            _log().info("Migrated email password to secure keyring storage")
+            return True
+        else:
+            _log().warning("Could not migrate password to keyring, keeping in config")
+    return False

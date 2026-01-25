@@ -126,7 +126,43 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON readings(sensor_id, ts);
         """
     )
+    # ADD: Stats table for operational metrics
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER DEFAULT 0,
+            updated_ts REAL
+        );
+        """
+    )
     conn.commit()
+
+
+def increment_dropped_readings(conn: sqlite3.Connection, count: int = 1) -> None:
+    """Increment the persistent dropped readings counter."""
+    conn.execute(
+        """
+        INSERT INTO system_stats (key, value, updated_ts)
+        VALUES ('dropped_readings', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET 
+            value = value + excluded.value,
+            updated_ts = excluded.updated_ts
+        """,
+        (count, time.time())
+    )
+    conn.commit()
+
+
+def get_dropped_readings_count(conn: sqlite3.Connection) -> int:
+    """Get total dropped readings count."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM system_stats WHERE key = 'dropped_readings'"
+        ).fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
 
 
 def insert_reading(conn: sqlite3.Connection, r: Reading) -> None:
@@ -175,6 +211,8 @@ class DatabaseWriter:
         self.total_writes = 0
         self.total_batches = 0
         self.errors = 0
+        self.dropped_readings = 0
+        
         # WAL checkpointing state
         self._last_checkpoint_ts = 0.0
         self._checkpoint_interval_s = WAL_CHECKPOINT_INTERVAL_S
@@ -231,12 +269,16 @@ class DatabaseWriter:
     def submit(self, reading: Reading) -> None:
         """
         Non-blocking submit.
-        If queue is full, drop oldest item, then try again.
+        If queue is full, drop oldest item and log it.
         """
         try:
             self._queue.put_nowait(reading)
         except queue.Full:
-            logger.warning("DatabaseWriter queue full; dropping oldest item")
+            self.dropped_readings += 1  # Track dropped readings
+            logger.warning(
+                "DatabaseWriter queue full; dropping reading (total dropped: %d)",
+                self.dropped_readings
+            )
             try:
                 _ = self._queue.get_nowait()
             except queue.Empty:
@@ -244,7 +286,8 @@ class DatabaseWriter:
             try:
                 self._queue.put_nowait(reading)
             except queue.Full:
-                logger.warning("DatabaseWriter queue still full; dropping new item")
+                self.dropped_readings += 1
+                logger.warning("DatabaseWriter queue still full; dropping new reading")
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -273,6 +316,7 @@ class DatabaseWriter:
             "WAL checkpoint completed (wal_mb=%.1f, wal_frames=%d, checkpointed=%d, force=%s)",
             wal_mb, wal_frames, ckpt_frames, force
         )
+
 
     # -------------------------
     # Internal implementation
@@ -347,6 +391,18 @@ class DatabaseWriter:
             except Exception:
                 pass
 
+def get_stats(self) -> dict:
+        """Get writer statistics for monitoring."""
+        return {
+            "total_writes": self.total_writes,
+            "total_batches": self.total_batches,
+            "errors": self.errors,
+            "dropped_readings": self.dropped_readings,
+            "queue_size": self._queue.qsize(),
+            "queue_max": self._queue.maxsize,
+            "is_alive": self.is_alive(),
+        }
+    
 # ---------------------------------------------------------------------
 # Database statistics
 # ---------------------------------------------------------------------

@@ -26,6 +26,11 @@ from typing import Dict, List, Optional, Callable
 
 from logging_config import get_logger
 
+# Email circuit breaker settings
+EMAIL_MAX_CONSECUTIVE_FAILURES = 5
+EMAIL_BACKOFF_BASE_SECONDS = 60  # 1 minute
+EMAIL_BACKOFF_MAX_SECONDS = 3600  # 1 hour cap
+
 _log = get_logger("watchdog.alert_engine")
 
 
@@ -62,6 +67,19 @@ def init_alert_tables(conn: sqlite3.Connection) -> None:
             silenced_until REAL,
             silenced_severity INTEGER
         );
+        
+        -- Email circuit breaker state
+        CREATE TABLE IF NOT EXISTS email_circuit_breaker (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            consecutive_failures INTEGER DEFAULT 0,
+            disabled_at_ts REAL,
+            last_failure_ts REAL,
+            last_error_message TEXT,
+            next_retry_ts REAL
+        );
+        
+        INSERT OR IGNORE INTO email_circuit_breaker (id, consecutive_failures)
+        VALUES (1, 0);
         
         -- System heartbeat for health monitoring
         CREATE TABLE IF NOT EXISTS system_heartbeat (
@@ -395,6 +413,125 @@ class PersistentAlarmStore:
             silenced_severity=Severity(row['silenced_severity']) if row['silenced_severity'] else None,
         )
 
+class EmailCircuitBreaker:
+    """
+    Manages email sending failures with exponential backoff.
+    
+    After EMAIL_MAX_CONSECUTIVE_FAILURES, email is disabled until user re-tests.
+    """
+    
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._local = threading.local()
+    
+    def _get_conn(self) -> sqlite3.Connection:
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path, timeout=10.0)
+            self._local.conn.row_factory = sqlite3.Row
+        return self._local.conn
+    
+    def get_state(self) -> dict:
+        """Get current circuit breaker state."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT * FROM email_circuit_breaker WHERE id = 1").fetchone()
+            if row:
+                return dict(row)
+        except sqlite3.OperationalError:
+            pass
+        return {
+            "consecutive_failures": 0,
+            "disabled_at_ts": None,
+            "last_failure_ts": None,
+            "last_error_message": None,
+            "next_retry_ts": None,
+        }
+    
+    def is_email_allowed(self) -> tuple[bool, str]:
+        """Check if email sending is currently allowed. Returns (allowed, reason)."""
+        state = self.get_state()
+        
+        # Check if disabled
+        if state.get("disabled_at_ts"):
+            return False, "Email disabled due to repeated failures. Re-test email in Settings to re-enable."
+        
+        # Check backoff
+        next_retry = state.get("next_retry_ts")
+        if next_retry and time.time() < next_retry:
+            wait_sec = int(next_retry - time.time())
+            return False, f"Email paused for {wait_sec}s after previous failure. Will retry automatically."
+        
+        return True, ""
+    
+    def record_success(self) -> None:
+        """Record successful email send - resets failure counter."""
+        conn = self._get_conn()
+        conn.execute("""
+            UPDATE email_circuit_breaker 
+            SET consecutive_failures = 0, 
+                last_failure_ts = NULL, 
+                last_error_message = NULL,
+                next_retry_ts = NULL,
+                disabled_at_ts = NULL
+            WHERE id = 1
+        """)
+        conn.commit()
+        _log.info("Email circuit breaker reset after successful send")
+    
+    def record_failure(self, error_message: str) -> tuple[bool, str]:
+        """
+        Record email failure. Returns (is_now_disabled, user_message).
+        """
+        conn = self._get_conn()
+        now = time.time()
+        
+        # Get current state
+        state = self.get_state()
+        failures = state.get("consecutive_failures", 0) + 1
+        
+        # Calculate backoff
+        backoff = min(
+            EMAIL_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+            EMAIL_BACKOFF_MAX_SECONDS
+        )
+        next_retry = now + backoff
+        
+        # Check if we should disable
+        is_disabled = failures >= EMAIL_MAX_CONSECUTIVE_FAILURES
+        disabled_ts = now if is_disabled else None
+        
+        conn.execute("""
+            UPDATE email_circuit_breaker 
+            SET consecutive_failures = ?,
+                last_failure_ts = ?,
+                last_error_message = ?,
+                next_retry_ts = ?,
+                disabled_at_ts = ?
+            WHERE id = 1
+        """, (failures, now, error_message[:500], next_retry if not is_disabled else None, disabled_ts))
+        conn.commit()
+        
+        if is_disabled:
+            _log.error("Email circuit breaker OPEN - disabled after %d failures", failures)
+            # Create system alarm
+            return True, f"Email notifications disabled after {failures} consecutive failures. Check your email settings."
+        else:
+            _log.warning("Email failure %d/%d, backing off %ds", 
+                        failures, EMAIL_MAX_CONSECUTIVE_FAILURES, int(backoff))
+            return False, f"Email failed ({failures}/{EMAIL_MAX_CONSECUTIVE_FAILURES}). Will retry in {int(backoff)}s."
+    
+    def reset_for_retest(self) -> None:
+        """Reset circuit breaker when user re-tests email (called from UI)."""
+        conn = self._get_conn()
+        conn.execute("""
+            UPDATE email_circuit_breaker 
+            SET consecutive_failures = 0,
+                disabled_at_ts = NULL,
+                next_retry_ts = NULL
+            WHERE id = 1
+        """)
+        conn.commit()
+        _log.info("Email circuit breaker reset for re-test")
 
 # =============================================================================
 # ALERT CHECKING LOGIC (moved from alerts.py, no pandas dependency)
@@ -584,7 +721,7 @@ class AlertEngine:
     def __init__(
         self,
         db_path: Path,
-        config_loader: Callable,  # Function that returns current AppConfig
+        config_loader: Callable,
         check_interval_seconds: int = 60,
         heartbeat_interval_seconds: int = 300,
     ):
@@ -594,6 +731,7 @@ class AlertEngine:
         self.heartbeat_interval = heartbeat_interval_seconds
         
         self.alarm_store = PersistentAlarmStore(db_path)
+        self.email_circuit_breaker = EmailCircuitBreaker(db_path)  # ADD THIS
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         
@@ -726,7 +864,14 @@ class AlertEngine:
         condition: AlertCondition,
         notification_type: str,
     ) -> None:
-        """Send an alarm notification email."""
+        """Send an alarm notification email with circuit breaker protection."""
+        
+        # Check circuit breaker first
+        allowed, reason = self.email_circuit_breaker.is_email_allowed()
+        if not allowed:
+            _log.debug("Email skipped: %s", reason)
+            return
+        
         try:
             from notifications import send_alarm_email
             
@@ -746,11 +891,23 @@ class AlertEngine:
             )
             
             if success:
+                self.email_circuit_breaker.record_success()
                 self.alarm_store.mark_notified(alarm.sensor_id, alarm.alert_type)
                 self.notifications_sent += 1
                 _log.info("Sent %s notification for %s", notification_type, alarm.alarm_key)
             else:
+                is_disabled, user_msg = self.email_circuit_breaker.record_failure(error)
                 _log.error("Failed to send notification for %s: %s", alarm.alarm_key, error)
+                
+                if is_disabled:
+                    # Create EMAIL_CONFIG_ERROR alarm
+                    self.alarm_store.upsert_alarm(
+                        sensor_id="SYSTEM",
+                        alert_type="email_error",
+                        sensor_name="Email System",
+                        severity=Severity.CRITICAL,
+                        message=user_msg,
+                    )
             
             self.alarm_store.log_notification(
                 alarm.sensor_id, alarm.alert_type, notification_type, success, error if not success else None
@@ -758,6 +915,7 @@ class AlertEngine:
         
         except Exception as e:
             _log.exception("Error sending alarm notification: %s", e)
+            self.email_circuit_breaker.record_failure(str(e))
             self.alarm_store.log_notification(
                 alarm.sensor_id, alarm.alert_type, notification_type, False, str(e)
             )

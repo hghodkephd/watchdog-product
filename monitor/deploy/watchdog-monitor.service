@@ -22,6 +22,10 @@ RestartSec=10s
 Environment=PYTHONUNBUFFERED=1
 
 MemoryMax=256M
+
+# Nice=-5 gives moderate priority boost for reliable sensor polling.
+# This ensures BLE scanning isn't starved by other processes on the Pi.
+# Safe for Pi Zero 2 W. Adjust to 0 if you run other critical services.
 Nice=-5
 
 StandardOutput=journal

@@ -261,6 +261,7 @@ def fetch_weather_series(
     lon: float,
     start: datetime,
     end: datetime,
+    timezone: str = "auto",
 ) -> Optional[pd.DataFrame]:
     """
     Fetch an hourly time series between start and end (inclusive) for:
@@ -275,6 +276,17 @@ def fetch_weather_series(
         DataFrame with columns: timestamp, wx_temp_c, wx_humidity, wx_wind_mph
         Returns None on failure.
     """
+    
+    # Validate timezone if provided
+    if timezone and timezone != "auto":
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(timezone)  # Validate it's a real timezone
+        except Exception:
+            _log = logging.getLogger(__name__)
+            _log.warning("Invalid timezone '%s', using 'auto'", timezone)
+            timezone = "auto"
+            
     base_url = "https://api.open-meteo.com/v1/forecast"
 
     start_date = start.date().isoformat()

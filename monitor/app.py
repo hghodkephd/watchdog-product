@@ -338,6 +338,8 @@ with tab1:
         st.error(f"Database error: {e}")
         df_latest = pd.DataFrame()
         conn = None
+        
+    
     
     if not df_latest.empty:
         # -----------------------------------------------------------------

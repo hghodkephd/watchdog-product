@@ -39,6 +39,15 @@ def _send_email(config: "EmailConfig", subject: str, body_text: str, body_html: 
     if not config.is_configured():
         return False, "Email not configured"
     
+    # Check if email is disabled due to errors
+    if getattr(config, 'email_disabled_due_to_errors', False):
+        return False, "Email disabled due to repeated failures. Please re-test in Settings."
+    
+    # Get actual password from keyring
+    actual_password = config.get_actual_password()
+    if not actual_password:
+        return False, "Email password not found. Please re-enter in Settings."
+    
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -48,9 +57,9 @@ def _send_email(config: "EmailConfig", subject: str, body_text: str, body_html: 
         msg.attach(MIMEText(body_html, "html"))
         
         context = ssl.create_default_context()
-        with smtplib.SMTP(config.smtp_server, config.smtp_port) as server:
+        with smtplib.SMTP(config.smtp_server, config.smtp_port, timeout=30) as server:
             server.starttls(context=context)
-            server.login(config.sender_email, config.sender_password)
+            server.login(config.sender_email, actual_password)
             server.sendmail(config.sender_email, config.recipient, msg.as_string())
         
         _log.info("Email sent: %s → %s", subject, config.recipient)
@@ -58,13 +67,22 @@ def _send_email(config: "EmailConfig", subject: str, body_text: str, body_html: 
     
     except smtplib.SMTPAuthenticationError:
         _log.error("SMTP auth failed")
-        return False, "Authentication failed - check credentials"
+        return False, "Email login failed. Check your email address and app password."
+    except smtplib.SMTPRecipientsRefused:
+        _log.error("SMTP recipient refused")
+        return False, "Recipient email address was rejected. Check the address."
+    except smtplib.SMTPServerDisconnected:
+        _log.error("SMTP server disconnected")
+        return False, "Email server disconnected. Check your internet connection."
     except smtplib.SMTPException as e:
         _log.error("SMTP error: %s", e)
-        return False, f"SMTP error: {e}"
+        return False, f"Could not send email. Server said: {str(e)[:100]}"
+    except TimeoutError:
+        _log.error("SMTP timeout")
+        return False, "Email server did not respond. Check your internet connection."
     except Exception as e:
         _log.exception("Email failed")
-        return False, str(e)
+        return False, f"Unexpected error: {str(e)[:100]}"
 
 
 def send_test_email(config: "EmailConfig") -> tuple[bool, str]:

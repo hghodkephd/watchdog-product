@@ -182,7 +182,8 @@ Access dashboard: `http://[raspberry-pi-ip]:8501`
 
 ## Configuration
 
-Configuration is stored in `~/.watchdog/config.json`
+Configuration is stored in `~/.config/watchdog/config.json`
+
 
 ### Sensor Configuration
 ```json
@@ -328,7 +329,7 @@ sudo systemctl restart watchdog-monitor
 
 ```bash
 # Check watchdog enabled in config
-cat ~/.watchdog/config.json | grep watchdog_enabled
+cat ~/.config/watchdog/config.json | grep watchdog_enabled
 
 # Check logs for restart events
 grep "Requesting scanner restart" ~/.watchdog/logs/monitor.log

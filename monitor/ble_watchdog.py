@@ -170,19 +170,17 @@ class WatchdogMonitor:
     
     def _watchdog_thread_func(self):
         """
-        Watchdog monitoring thread - KEY DIFFERENTIATOR from OSS.
-        
-        Monitors data flow and triggers scanner restart if stalled.
-        Also handles periodic archiving.
+        Watchdog monitoring thread.
         """
         _log_core.info("Watchdog thread started")
         
-        # Track time for periodic tasks
         last_archive_time = time.time()
-        ARCHIVE_INTERVAL = 86400  # 24 hours in seconds
+        last_prune_time = time.time()  # ADD THIS
+        ARCHIVE_INTERVAL = 86400  # 24 hours
+        PRUNE_INTERVAL = 3600  # 1 hour  # ADD THIS
         
         while self.running:
-            time.sleep(10)  # Check every 10 seconds
+            time.sleep(10)
             
             # === Existing watchdog checks ===
             if self.cfg.monitoring.watchdog_enabled:
@@ -213,7 +211,21 @@ class WatchdogMonitor:
                             num_sensors,
                             time_since_last_data,
                         )
-            
+ 
+            # === Periodic stale cache pruning === ADD THIS BLOCK
+            now = time.time()
+            if (now - last_prune_time) > PRUNE_INTERVAL:
+                try:
+                    from ble_scanner import prune_stale_readings, get_cache_stats
+                    pruned = prune_stale_readings(max_age_seconds=3600)
+                    if pruned > 0:
+                        _log_core.info("Pruned %d stale sensor cache entries", pruned)
+                    stats = get_cache_stats()
+                    _log_core.debug("Sensor cache: %d entries", stats.get('count', 0))
+                except Exception as e:
+                    _log_core.warning("Cache prune failed: %s", e)
+                last_prune_time = now
+                
             # === Periodic archiving ===
             if self.cfg.archive.enabled and self.cfg.archive.auto_archive:
                 now = time.time()

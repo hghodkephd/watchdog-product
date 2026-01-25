@@ -177,7 +177,48 @@ def render_alarm_summary_badge():
     else:
         st.warning(f"🟡 {counts['warning']} warning alert(s)")
 
+def get_email_circuit_breaker_status(db_path=None) -> dict:
+    """Get email circuit breaker status for UI display."""
+    if db_path is None:
+        db_path = get_db_path()
+    
+    try:
+        from alert_engine import EmailCircuitBreaker
+        breaker = EmailCircuitBreaker(db_path)
+        state = breaker.get_state()
+        allowed, reason = breaker.is_email_allowed()
+        
+        return {
+            "allowed": allowed,
+            "reason": reason,
+            "consecutive_failures": state.get("consecutive_failures", 0),
+            "is_disabled": state.get("disabled_at_ts") is not None,
+            "last_error": state.get("last_error_message"),
+        }
+    except Exception as e:
+        return {
+            "allowed": True,
+            "reason": "",
+            "consecutive_failures": 0,
+            "is_disabled": False,
+            "last_error": None,
+            "error": str(e),
+        }
 
+
+def reset_email_circuit_breaker(db_path=None) -> bool:
+    """Reset email circuit breaker (called when user re-tests email)."""
+    if db_path is None:
+        db_path = get_db_path()
+    
+    try:
+        from alert_engine import EmailCircuitBreaker
+        breaker = EmailCircuitBreaker(db_path)
+        breaker.reset_for_retest()
+        return True
+    except Exception:
+        return False
+    
 # =============================================================================
 # 3. EMAIL SETTINGS UI
 #    Add this to the Settings tab (tab3), after alert configuration
@@ -190,6 +231,21 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
     Returns: updated EmailConfig or None if unchanged
     """
     st.subheader("📧 Email Notifications")
+    
+    # Check circuit breaker status
+    cb_status = get_email_circuit_breaker_status()
+    
+    if cb_status.get("is_disabled"):
+        st.error(
+            "⚠️ **Email notifications are paused** due to repeated delivery failures.\n\n"
+            f"Last error: {cb_status.get('last_error', 'Unknown')}\n\n"
+            "Please check your settings below and click **Send Test Email** to re-enable."
+        )
+    elif cb_status.get("consecutive_failures", 0) > 0:
+        st.warning(
+            f"⚠️ Email has failed {cb_status['consecutive_failures']} time(s) recently. "
+            "Notifications will retry automatically with increasing delays."
+        )
     
     st.info(
         "Get email alerts when sensors exceed thresholds. "
@@ -256,13 +312,20 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
             key="email_smtp_port"
         )
         
-        sender_password = st.text_input(
+        # Password handling with keyring
+        current_password_display = "••••••••" if email_config.get_actual_password() else ""
+        new_password = st.text_input(
             "App Password",
-            value=email_config.sender_password,
+            value="",
             type="password",
-            help="For Gmail, use an App Password (not your regular password)",
+            placeholder=current_password_display or "Enter Gmail app password",
+            help="For Gmail, use an App Password (not your regular password). Leave blank to keep existing.",
             key="email_password"
         )
+        
+        # Only update password if user entered something new
+        if new_password:
+            email_config.set_password(new_password)
     
     notify_on_clear = st.checkbox(
         "Send email when alarm clears",
@@ -287,10 +350,13 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
     col1, col2 = st.columns([1, 3])
     with col1:
         if st.button("📤 Send Test Email", disabled=not test_config.is_configured()):
+            # Reset circuit breaker before test
+            reset_email_circuit_breaker()
+            
             with st.spinner("Sending..."):
                 success, msg = send_test_email(test_config)
                 if success:
-                    st.success("✓ Test email sent! Check your inbox.")
+                    st.success("✓ Test email sent! Check your inbox. Email notifications are now enabled.")
                 else:
                     st.error(f"✗ Failed: {msg}")
     

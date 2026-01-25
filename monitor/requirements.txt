@@ -16,3 +16,6 @@ requests>=2.31.0
 # System monitoring
 psutil>=5.9.0
 platformdirs>=4.0.0
+
+# Secure credential storage
+keyring>=24.0.0

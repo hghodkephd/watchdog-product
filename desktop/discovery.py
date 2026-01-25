@@ -8,8 +8,12 @@ import urllib.request
 import urllib.error
 from typing import Optional, Tuple
 from dataclasses import dataclass
+import time  
 
-
+# Discovery timeouts (increased for reliability)
+MDNS_TIMEOUT_SECONDS = 5.0  # Was 2.0
+MDNS_RETRY_COUNT = 2
+HEALTH_CHECK_TIMEOUT = 3.0
 @dataclass
 class WatchdogHealth:
     """Health status of a discovered Watchdog device."""
@@ -220,45 +224,54 @@ def discover_and_check_health() -> Tuple[Optional[str], WatchdogHealth, str]:
 
 def _discover_macos_fast() -> Optional[str]:
     """Fast macOS mDNS discovery using dns-sd."""
-    try:
-        # Use timeout to prevent hanging
-        result = subprocess.run(
-            ["dns-sd", "-G", "v4", "watchdog.local"],
-            capture_output=True,
-            text=True,
-            timeout=2  # 2 second timeout
-        )
-        
-        for line in result.stdout.split("\n"):
-            if "watchdog.local" in line.lower():
-                parts = line.split()
-                for part in parts:
-                    if _is_valid_private_ip(part):
-                        return part
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    for attempt in range(MDNS_RETRY_COUNT):
+        try:
+            result = subprocess.run(
+                ["dns-sd", "-G", "v4", "watchdog.local"],
+                capture_output=True,
+                text=True,
+                timeout=MDNS_TIMEOUT_SECONDS
+            )
+            
+            for line in result.stdout.split("\n"):
+                if "watchdog.local" in line.lower():
+                    parts = line.split()
+                    for part in parts:
+                        if _is_valid_private_ip(part):
+                            return part
+        except subprocess.TimeoutExpired:
+            if attempt < MDNS_RETRY_COUNT - 1:
+                time.sleep(0.5)  # Brief pause before retry
+                continue
+        except FileNotFoundError:
+            break
     
     return None
 
 
 def _discover_linux_fast() -> Optional[str]:
     """Fast Linux mDNS discovery using avahi."""
-    try:
-        result = subprocess.run(
-            ["avahi-resolve", "-4", "-n", "watchdog.local"],
-            capture_output=True,
-            text=True,
-            timeout=2  # 2 second timeout
-        )
-        
-        for line in result.stdout.split("\n"):
-            parts = line.split()
-            if len(parts) >= 2:
-                ip = parts[-1]
-                if _is_valid_private_ip(ip):
-                    return ip
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    for attempt in range(MDNS_RETRY_COUNT):
+        try:
+            result = subprocess.run(
+                ["avahi-resolve", "-4", "-n", "watchdog.local"],
+                capture_output=True,
+                text=True,
+                timeout=MDNS_TIMEOUT_SECONDS
+            )
+            
+            for line in result.stdout.split("\n"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[-1]
+                    if _is_valid_private_ip(ip):
+                        return ip
+        except subprocess.TimeoutExpired:
+            if attempt < MDNS_RETRY_COUNT - 1:
+                time.sleep(0.5)  # Brief pause before retry
+                continue
+        except FileNotFoundError:
+            break  # avahi-resolve not installed, no point retrying
     
     return None
 
@@ -272,50 +285,56 @@ def _discover_windows_fast() -> Optional[str]:
     - Older Windows needs Bonjour Print Services or iTunes installed
     - dns-sd.exe is available if Bonjour is installed
     
-    This function tries multiple approaches.
+    This function tries multiple approaches with retries.
     """
     # Approach 1: Try dns-sd.exe (available if Bonjour is installed)
-    try:
-        # dns-sd on Windows needs different handling than macOS
-        result = subprocess.run(
-            ["dns-sd", "-G", "v4", "watchdog.local"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        )
-        
-        for line in result.stdout.split("\n"):
-            # Look for IP addresses in output
-            parts = line.split()
-            for part in parts:
-                if _is_valid_private_ip(part):
-                    return part
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+    for attempt in range(MDNS_RETRY_COUNT):
+        try:
+            result = subprocess.run(
+                ["dns-sd", "-G", "v4", "watchdog.local"],
+                capture_output=True,
+                text=True,
+                timeout=MDNS_TIMEOUT_SECONDS,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            for line in result.stdout.split("\n"):
+                parts = line.split()
+                for part in parts:
+                    if _is_valid_private_ip(part):
+                        return part
+        except subprocess.TimeoutExpired:
+            if attempt < MDNS_RETRY_COUNT - 1:
+                time.sleep(0.5)
+                continue
+        except (FileNotFoundError, OSError):
+            break  # dns-sd not available, try next approach
     
     # Approach 2: Try PowerShell Resolve-DnsName (Windows 10+)
-    try:
-        result = subprocess.run(
-            ["powershell", "-Command", 
-             "Resolve-DnsName -Name 'watchdog.local' -Type A -DnsOnly -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        )
-        
-        for line in result.stdout.strip().split("\n"):
-            ip = line.strip()
-            if _is_valid_private_ip(ip):
-                return ip
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+    for attempt in range(MDNS_RETRY_COUNT):
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", 
+                 "Resolve-DnsName -Name 'watchdog.local' -Type A -DnsOnly -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"],
+                capture_output=True,
+                text=True,
+                timeout=MDNS_TIMEOUT_SECONDS,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            for line in result.stdout.strip().split("\n"):
+                ip = line.strip()
+                if _is_valid_private_ip(ip):
+                    return ip
+        except subprocess.TimeoutExpired:
+            if attempt < MDNS_RETRY_COUNT - 1:
+                time.sleep(0.5)
+                continue
+        except (FileNotFoundError, OSError):
+            break
     
-    # Approach 3: NetBIOS name resolution (legacy fallback)
-    # This won't find .local names but might work if Watchdog advertises NetBIOS
+    # Approach 3: NetBIOS name resolution (legacy fallback, no retry needed)
     try:
-        # Try without .local suffix
         ip = socket.gethostbyname("watchdog")
         if _is_valid_private_ip(ip):
             return ip

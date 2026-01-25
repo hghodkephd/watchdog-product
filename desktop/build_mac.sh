@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Watchdog"
-APP_VERSION="1.0.0"
+APP_VERSION="1.0.1"
 BUNDLE_ID="com.watchdog.desktop"
 OUTPUT_DIR="$SCRIPT_DIR/../releases/desktop/macos"
 VENV_DIR="$SCRIPT_DIR/.build-venv"

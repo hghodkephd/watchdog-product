@@ -343,19 +343,19 @@ class WatchdogApp:
                     }}
                 }}
                 
-                async function connect() {{
+                async function connect() {
                     const ip = document.getElementById('ip').value.trim();
                     const btn = document.getElementById('connect-btn');
                     
-                    if (!ip) {{
+                    if (!ip) {
                         updateStatus('Please enter an IP address', 'error', '');
                         return;
-                    }}
+                    }
                     
-                    if (!ip.match(/^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$/)) {{
+                    if (!ip.match(/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/)) {
                         updateStatus('Invalid IP address format', 'error', 'Example: 192.168.0.21');
                         return;
-                    }}
+                    }
                     
                     btn.disabled = true;
                     btn.textContent = 'Connecting...';
@@ -364,14 +364,58 @@ class WatchdogApp:
                     
                     const result = await tryApi('connect', ip);
                     
-                    if (result && result.success) {{
-                        updateStatus('✓ Connected! Opening dashboard...', 'success', '');
-                    }} else {{
-                        updateStatus('Could not connect to ' + ip, 'error', result ? result.error : 'Check IP and try again');
+                    if (result && result.success) {
+                        const statusMsg = result.monitoring_active 
+                            ? '✓ Connected! Opening dashboard...'
+                            : '✓ Connected (monitoring stopped)';
+                        updateStatus(statusMsg, 'success', '');
+                    } else if (result && result.needs_acknowledgment) {
+                        // Show warning dialog for monitoring-stopped state
+                        showMonitoringWarning(ip, result.detail);
                         btn.disabled = false;
                         btn.textContent = 'Connect';
-                    }}
-                }}
+                        document.getElementById('spinner').style.display = 'none';
+                    } else {
+                        const detail = result ? result.detail : 'Check IP and try again';
+                        updateStatus(result ? result.error : 'Connection failed', 'error', detail);
+                        btn.disabled = false;
+                        btn.textContent = 'Connect';
+                    }
+                }
+                
+                function showMonitoringWarning(ip, detail) {
+                    const statusEl = document.getElementById('status');
+                    statusEl.className = 'status warning';
+                    statusEl.innerHTML = `
+                        <div style="text-align: left;">
+                            <strong>⚠️ Monitoring Service Stopped</strong>
+                            <p style="margin: 12px 0; font-size: 13px;">${detail}</p>
+                            <div style="display: flex; gap: 12px; margin-top: 16px;">
+                                <button onclick="proceedAnyway('${ip}')" 
+                                    style="flex: 1; padding: 10px; background: #d97706; border: none; 
+                                           border-radius: 6px; color: white; cursor: pointer;">
+                                    Open Dashboard Anyway
+                                </button>
+                                <button onclick="cancelConnect()" 
+                                    style="flex: 1; padding: 10px; background: transparent; 
+                                           border: 1px solid #666; border-radius: 6px; color: #888; cursor: pointer;">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                async function proceedAnyway(ip) {
+                    updateStatus('Opening dashboard...', 'pending', 'Monitoring is stopped - alerts will not work');
+                    document.getElementById('spinner').style.display = 'block';
+                    await tryApi('connect_with_acknowledgment', ip);
+                }
+                
+                function cancelConnect() {
+                    updateStatus('Connection cancelled', 'error', 'Start monitoring on the Pi first, then try again');
+                    document.getElementById('spinner').style.display = 'none';
+                }
                 
                 function quit() {{
                     tryApi('quit');
@@ -505,20 +549,55 @@ class SetupAPI:
         return {"found": False, "ip": None, "discovery_message": discovery_msg, "health": None}
     
     def connect(self, ip: str) -> dict:
-        """Connect and launch dashboard."""
-        health = check_watchdog_health(ip, timeout=2.0)
+        """Connect and launch dashboard - requires daemon to be running."""
+        health = check_watchdog_health(ip, timeout=3.0)
         
-        if health.dashboard_up:
+        # Case 1: Dashboard up AND daemon running - full success
+        if health.dashboard_up and health.daemon_running:
             self.app.config.set("watchdog_ip", ip)
             self.app._current_ip = ip
             self.app.window.load_url(f"http://{ip}:8501")
             self.app.window.resize(1200, 800)
             self.app.window.set_title(APP_NAME)
-            return {"success": True}
+            return {"success": True, "monitoring_active": True}
+        
+        # Case 2: Dashboard up but daemon NOT running - require acknowledgment
+        elif health.dashboard_up and not health.daemon_running:
+            return {
+                "success": False,
+                "needs_acknowledgment": True,
+                "error": "Monitoring service is not running",
+                "detail": "The dashboard is available but the monitoring service is stopped. "
+                          "Alerts will NOT work until monitoring is started.",
+                "can_proceed": True,  # Allow user to proceed with warning
+            }
+        
+        # Case 3: Pi reachable but dashboard not running
         elif health.reachable:
-            return {"success": False, "error": "Pi reachable but dashboard not running. Check the monitoring service."}
+            return {
+                "success": False, 
+                "error": "Dashboard not running",
+                "detail": "The Watchdog Pi is reachable but the dashboard service isn't running. "
+                          "Try restarting the services on the Pi."
+            }
+        
+        # Case 4: Nothing reachable
         else:
-            return {"success": False, "error": "Dashboard not responding"}
+            return {
+                "success": False, 
+                "error": "Cannot reach Watchdog",
+                "detail": "Could not connect to the Watchdog Pi. Check that it's powered on "
+                          "and connected to the same network."
+            }
+    
+    def connect_with_acknowledgment(self, ip: str) -> dict:
+        """Connect even though monitoring is stopped (user acknowledged warning)."""
+        self.app.config.set("watchdog_ip", ip)
+        self.app._current_ip = ip
+        self.app.window.load_url(f"http://{ip}:8501")
+        self.app.window.resize(1200, 800)
+        self.app.window.set_title(f"{APP_NAME} ⚠️ Monitoring Stopped")
+        return {"success": True, "monitoring_active": False}
     
     def quit(self):
         """Exit application."""
