@@ -14,6 +14,14 @@ from typing import Dict, Optional
 from platformdirs import user_config_dir
 import keyring
 
+try:
+    # Force file-based backend on headless systems (Raspberry Pi)
+    from keyrings.alt.file import PlaintextKeyring
+    keyring.set_keyring(PlaintextKeyring())
+except Exception:
+    # Fall back to default behavior (desktop OS)
+    pass
+
 APP_NAME = "watchdog"
 APP_AUTHOR = "watchdog-env-monitor"
 
