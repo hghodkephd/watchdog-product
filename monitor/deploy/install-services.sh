@@ -67,12 +67,19 @@ sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
     > "$SERVICE_DIR/watchdog-dashboard.service"
 
 sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
+    -e "s|__WATCHDOG_USER__|$WATCHDOG_USER|g" \
+    -e "s|__WATCHDOG_GROUP__|$WATCHDOG_GROUP|g" \
+    "$WATCHDOG_DIR/deploy/watchdog-health.service" \
+    > "$SERVICE_DIR/watchdog-health.service"
+
+sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
     "$WATCHDOG_DIR/deploy/watchdog-bt-unblock.service" \
     > "$SERVICE_DIR/watchdog-bt-unblock.service"
 
 chmod 644 \
   "$SERVICE_DIR/watchdog-monitor.service" \
   "$SERVICE_DIR/watchdog-dashboard.service" \
+  "$SERVICE_DIR/watchdog-health.service" \
   "$SERVICE_DIR/watchdog-bt-unblock.service"
 
 echo
@@ -82,19 +89,21 @@ systemctl daemon-reload
 echo
 echo "[Watchdog] Enabling services..."
 systemctl enable watchdog-bt-unblock.service
-systemctl enable watchdog-monitor.service watchdog-dashboard.service
+systemctl enable watchdog-monitor.service watchdog-dashboard.service watchdog-health.service
 
 echo
 echo "[Watchdog] Starting services..."
 systemctl start watchdog-bt-unblock.service || true
-systemctl restart watchdog-monitor.service watchdog-dashboard.service
+systemctl restart watchdog-monitor.service watchdog-dashboard.service watchdog-health.service
 
 echo
 echo "[Watchdog] Status:"
 systemctl status watchdog-bt-unblock.service --no-pager -l || true
 systemctl status watchdog-monitor.service --no-pager -l || true
 systemctl status watchdog-dashboard.service --no-pager -l || true
+systemctl status watchdog-health.service --no-pager -l || true
 
 echo
 echo "✅ Watchdog services installed."
 echo "📊 Dashboard: http://<pi-hostname-or-ip>:8501"
+echo "❤️  Health:    http://<pi-hostname-or-ip>:8502/health"

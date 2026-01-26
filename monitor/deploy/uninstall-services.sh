@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
 
 if [ "$EUID" -ne 0 ]; then
   echo "ERROR: This script must be run as root (use sudo)"
@@ -10,11 +11,10 @@ SERVICE_DIR="/etc/systemd/system"
 
 echo "Removing Watchdog systemd services..."
 
-systemctl stop watchdog-dashboard || true
-systemctl stop watchdog-monitor || true
+systemctl stop watchdog-dashboard.service watchdog-monitor.service watchdog-health.service || true
 
-systemctl disable watchdog-dashboard || true
-systemctl disable watchdog-monitor || true
+systemctl disable watchdog-dashboard.service watchdog-monitor.service watchdog-health.service || true
+
 
 rm -f \
   "$SERVICE_DIR/watchdog-monitor.service" \
@@ -22,7 +22,8 @@ rm -f \
   "$SERVICE_DIR/watchdog-health.service"
 
 systemctl disable --now watchdog-bt-unblock.service || true
-rm -f /etc/systemd/system/watchdog-bt-unblock.service || true
+rm -f "$SERVICE_DIR/watchdog-bt-unblock.service" || true
+
 systemctl daemon-reload
 
 echo "🗑️  Watchdog services removed"

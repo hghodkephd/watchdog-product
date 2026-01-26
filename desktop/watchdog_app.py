@@ -73,10 +73,27 @@ HEALTH_MONITOR_JS = '''
     let consecutiveFailures = 0;
     let lastSuccessTime = Date.now();
     
+    async function canReachDashboard() {
+        // Reachability probe only (opaque response is fine)
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 1500);
+            await fetch('http://' + PI_IP + ':8501', {
+                signal: controller.signal,
+                cache: 'no-cache',
+                mode: 'no-cors',
+            });
+            clearTimeout(timeout);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+            
     async function checkHealth() {
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 2500);
             
             const resp = await fetch(HEALTH_URL, {
                 signal: controller.signal,
@@ -118,6 +135,23 @@ HEALTH_MONITOR_JS = '''
                     : elapsedSec + 's';
                 banner.innerHTML = '⚠️ <strong>Cannot reach Watchdog</strong> (last seen ' + elapsedStr + ' ago) — ' +
                     '<span style="opacity:0.85">Check if your Raspberry Pi is powered on.</span>';
+
+                // Classify failures for more actionable messaging
+                const isTimeout = (err && (err.name === 'AbortError' || ('' + err).includes('AbortError')));
+                const dashboardReachable = await canReachDashboard();
+
+                if (dashboardReachable) {
+                    banner.innerHTML = '⚠️ <strong>Health service not responding</strong> (port 8502) — ' +
+                        'Dashboard is reachable, but health checks are unavailable. ' +
+                        '<span style="opacity:0.85">Try reinstalling services or restarting watchdog-health.</span>';
+                } else if (isTimeout) {
+                    banner.innerHTML = '⚠️ <strong>Watchdog health check timed out</strong> (last seen ' + elapsedStr + ' ago) — ' +
+                        '<span style="opacity:0.85">Network or device may be busy. Check Wi-Fi and power.</span>';
+                } else {
+                    banner.innerHTML = '⚠️ <strong>Cannot reach Watchdog</strong> (last seen ' + elapsedStr + ' ago) — ' +
+                        '<span style="opacity:0.85">Check if your Raspberry Pi is powered on and on the same Wi-Fi.</span>';
+                }
+                
                 banner.style.display = 'block';
                 banner.setAttribute('data-visible', 'true');
             }

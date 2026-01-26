@@ -398,9 +398,8 @@ with tab1:
     # === First-run onboarding ===
     if is_first_run(cfg):
         if render_onboarding(cfg, status):
-            pass  # Onboarding rendered, skip normal content
-        # Note: render_onboarding handles its own st.stop() via rerun
-    
+            # Onboarding was rendered; do not render the normal Monitoring UI on this run.
+            st.stop()   
     
     # --------------------
     # System Health panel
@@ -530,6 +529,9 @@ with tab1:
     
     st.divider()
     
+    configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
+
+    
     # Get latest readings from database
     conn = None
     try:
@@ -569,13 +571,109 @@ with tab1:
         
     
     
+    # -----------------------------------------------------------------
+    # Configured sensor status table (shows sensors even if stale/offline)
+    # -----------------------------------------------------------------
+    if configured_ids:
+        df_cfg_latest = pd.DataFrame()
+        try:
+            if conn is None:
+                conn = get_connection()
+                init_db(conn)
+
+            placeholders = ",".join(["?"] * len(configured_ids))
+            query_cfg = f"""
+            SELECT
+                r.sensor_id,
+                r.ts AS timestamp,
+                r.temp_c,
+                r.humidity,
+                r.battery,
+                r.rssi
+            FROM readings r
+            JOIN (
+                SELECT sensor_id, MAX(ts) AS max_ts
+                FROM readings
+                WHERE sensor_id IN ({placeholders})
+                GROUP BY sensor_id
+            ) m
+            ON r.sensor_id = m.sensor_id AND r.ts = m.max_ts
+            """
+            df_cfg_latest = pd.read_sql_query(query_cfg, conn, params=tuple(configured_ids))
+        except Exception as e:
+            st.error(f"Database error (configured sensors): {e}")
+            df_cfg_latest = pd.DataFrame()
+
+        now_ts = time.time()
+        rows = []
+        for sensor_id in sorted(configured_ids):
+            sc = cfg.sensors.get(sensor_id)
+            display_name = getattr(sc, "name", sensor_id)
+
+            rec = None
+            if not df_cfg_latest.empty:
+                match = df_cfg_latest[df_cfg_latest["sensor_id"] == sensor_id]
+                if not match.empty:
+                    rec = match.iloc[0].to_dict()
+
+            last_ts = rec.get("timestamp") if rec else None
+            if last_ts is None or pd.isna(last_ts):
+                status_label = "NEVER"
+                age_min = None
+                last_seen_str = "Never"
+            else:
+                age_s = max(0.0, now_ts - float(last_ts))
+                age_min = age_s / 60.0
+
+                # Status thresholds (home monitoring defaults)
+                if age_s <= 300:
+                    status_label = "OK"
+                elif age_s <= 1800:
+                    status_label = "STALE"
+                else:
+                    status_label = "OFFLINE"
+
+                last_seen_str = datetime.fromtimestamp(float(last_ts)).strftime("%Y-%m-%d %H:%M:%S")
+
+            # Convert to user's units if we have a temperature
+            temp_display = ""
+            if rec and rec.get("temp_c") is not None and not pd.isna(rec.get("temp_c")):
+                temp_c = float(rec["temp_c"])
+                if cfg.units.upper() == "F":
+                    temp_display = f"{(temp_c * 9/5 + 32):.1f}°F"
+                else:
+                    temp_display = f"{temp_c:.1f}°C"
+
+            hum_display = ""
+            if rec and rec.get("humidity") is not None and not pd.isna(rec.get("humidity")):
+                hum_display = f"{float(rec['humidity']):.1f}%"
+
+            batt_display = ""
+            if rec and rec.get("battery") is not None and not pd.isna(rec.get("battery")):
+                batt_display = f"{float(rec['battery']):.0f}%"
+
+            rows.append({
+                "Name": display_name,
+                "Sensor ID": sensor_id,
+                "Status": status_label,
+                "Last seen": last_seen_str,
+                "Age (min)": "" if age_min is None else round(age_min, 1),
+                "Temp": temp_display,
+                "Humidity": hum_display,
+                "Battery": batt_display,
+            })
+
+        st.subheader("Configured Sensors")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.divider()
+    
     if not df_latest.empty:
         # -----------------------------------------------------------------
         # View selection:
         #   - df_latest: all detected sensors with a reading in the last 5 minutes
         #   - df_display: what Monitoring should show (configured-only once config exists)
         # -----------------------------------------------------------------
-        configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
+
         detected_ids = set(df_latest["sensor_id"].unique())
         unconfigured_detected = sorted(list(detected_ids - configured_ids))
 
