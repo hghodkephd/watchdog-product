@@ -401,6 +401,38 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
     # Return updated config
     return test_config
 
+def render_email_system_warning():
+    """
+    Render a NON-DISMISSABLE warning if email notifications are broken.
+    
+    This should be called at the TOP of the Monitoring tab, even before alarm banners,
+    because email failures are critical for the product's core value proposition.
+    """
+    cb_status = get_email_circuit_breaker_status()
+    
+    if cb_status.get("is_disabled"):
+        st.error(
+            "🚨 **EMAIL NOTIFICATIONS ARE DISABLED**\n\n"
+            f"After {cb_status.get('consecutive_failures', 5)} consecutive failures, "
+            "email alerts have been paused to prevent spam.\n\n"
+            f"**Last error:** {cb_status.get('last_error', 'Unknown')}\n\n"
+            "⚠️ **You will NOT receive email alerts until this is fixed.**\n\n"
+            "→ Go to **Settings → Email Notifications** to fix and re-test your email settings."
+        )
+        return True  # Indicates warning was shown
+    
+    elif cb_status.get("consecutive_failures", 0) >= 2:
+        # Show warning after 2+ failures (before full disable at 5)
+        failures = cb_status.get("consecutive_failures", 0)
+        st.warning(
+            f"⚠️ **Email delivery issues detected** ({failures}/5 failures)\n\n"
+            "Email notifications may not be working reliably. "
+            "Check your email settings if you don't receive alerts.\n\n"
+            f"Last error: {cb_status.get('last_error', 'Unknown')}"
+        )
+        return True
+    
+    return False  # No warning needed
 
 # =============================================================================
 # 4. NOTIFICATION LOG VIEWER (optional, for debugging)

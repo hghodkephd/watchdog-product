@@ -513,8 +513,7 @@ class EmailCircuitBreaker:
         
         if is_disabled:
             _log.error("Email circuit breaker OPEN - disabled after %d failures", failures)
-            # Create system alarm
-            return True, f"Email notifications disabled after {failures} consecutive failures. Check your email settings."
+            return True, f"Email disabled after {failures} failures. Go to Settings → Email Notifications to fix. Error: {error_message[:80]}"
         else:
             _log.warning("Email failure %d/%d, backing off %ds", 
                         failures, EMAIL_MAX_CONSECUTIVE_FAILURES, int(backoff))
@@ -900,13 +899,13 @@ class AlertEngine:
                 _log.error("Failed to send notification for %s: %s", alarm.alarm_key, error)
                 
                 if is_disabled:
-                    # Create EMAIL_CONFIG_ERROR alarm
+                    # Create EMAIL_CONFIG_ERROR alarm with clear action
                     self.alarm_store.upsert_alarm(
                         sensor_id="SYSTEM",
                         alert_type="email_error",
                         sensor_name="Email System",
                         severity=Severity.CRITICAL,
-                        message=user_msg,
+                        message=f"Email disabled after {failures} failures. Check Settings → Email to fix. Last error: {error[:100]}",
                     )
             
             self.alarm_store.log_notification(

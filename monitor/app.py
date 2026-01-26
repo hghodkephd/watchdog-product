@@ -24,6 +24,9 @@ from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPT
 from alarm_ui import render_alarm_banners, process_alerts_and_notify, render_email_settings
 from config import EmailConfig
 from notifications import send_test_email, send_alarm_email, send_cleared_email
+
+import streamlit.components.v1
+
 # Page config
 st.set_page_config(
     page_title="Watchdog Environmental Monitor",
@@ -34,6 +37,209 @@ st.set_page_config(
 
 # Load config
 cfg = load_config()
+
+
+def is_first_run(cfg) -> bool:
+    """
+    Detect if this is effectively a first run.
+    
+    Returns True if:
+    - No sensors are configured AND
+    - No data in the database (or very little)
+    """
+    # Check if any sensors are configured
+    if cfg.sensors and len(cfg.sensors) > 0:
+        return False
+    
+    # Check if database has significant data
+    try:
+        conn = get_connection()
+        result = conn.execute("SELECT COUNT(*) FROM readings").fetchone()
+        conn.close()
+        row_count = result[0] if result else 0
+        
+        # If less than 100 readings, treat as first run
+        return row_count < 100
+    except Exception:
+        return True  # Assume first run if we can't check
+
+
+def render_onboarding(cfg, status):
+    """
+    Render a guided onboarding flow for first-time users.
+    
+    Returns True if onboarding was rendered (caller should skip normal content).
+    """
+    st.markdown("""
+    ## 👋 Welcome to Watchdog!
+    
+    Let's get your environmental monitoring set up. This will take about 2 minutes.
+    """)
+    
+    # Step tracking
+    monitoring_running = status.get('is_running', False)
+    
+    # Check for detected sensors
+    detected_count = 0
+    try:
+        conn = get_connection()
+        cutoff = time.time() - 300  # Last 5 minutes
+        result = conn.execute(
+            "SELECT COUNT(DISTINCT sensor_id) FROM readings WHERE ts >= ?",
+            (cutoff,)
+        ).fetchone()
+        conn.close()
+        detected_count = result[0] if result else 0
+    except Exception:
+        pass
+    
+    sensors_detected = detected_count > 0
+    sensors_configured = bool(cfg.sensors and len(cfg.sensors) > 0)
+    
+    # Calculate current step
+    if not monitoring_running:
+        current_step = 1
+    elif not sensors_detected:
+        current_step = 2
+    elif not sensors_configured:
+        current_step = 3
+    else:
+        current_step = 4  # Complete
+    
+    # Progress indicator
+    st.progress(current_step / 4, text=f"Step {current_step} of 4")
+    
+    st.divider()
+    
+    # Step 1: Start Monitoring
+    col1, col2 = st.columns([1, 20])
+    with col1:
+        if monitoring_running:
+            st.markdown("### ✅")
+        else:
+            st.markdown("### 1️⃣")
+    with col2:
+        st.markdown("### Start Monitoring")
+        if not monitoring_running:
+            st.markdown("Click the button below to power on the Bluetooth scanner.")
+            if st.button("▶️ Start Monitoring", type="primary", key="onboard_start"):
+                success, msg, pid = start_monitoring()
+                if success:
+                    st.success(msg)
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        else:
+            st.markdown("✓ Monitoring is running")
+    
+    st.divider()
+    
+    # Step 2: Detect Sensors
+    col1, col2 = st.columns([1, 20])
+    with col1:
+        if sensors_detected:
+            st.markdown("### ✅")
+        elif monitoring_running:
+            st.markdown("### 2️⃣")
+        else:
+            st.markdown("### ⬜")
+    with col2:
+        st.markdown("### Detect Sensors")
+        if not monitoring_running:
+            st.caption("Start monitoring first")
+        elif not sensors_detected:
+            st.markdown("Scanning for Govee sensors... This usually takes 10-30 seconds.")
+            st.markdown("Make sure your sensors are powered on and within range (~30 feet).")
+            
+            # Auto-refresh while scanning
+            with st.spinner("Scanning for sensors..."):
+                st.caption("This page will refresh automatically.")
+                time.sleep(10)
+                st.rerun()
+        else:
+            st.markdown(f"✓ Found **{detected_count}** sensor(s)")
+    
+    st.divider()
+    
+    # Step 3: Configure Sensors
+    col1, col2 = st.columns([1, 20])
+    with col1:
+        if sensors_configured:
+            st.markdown("### ✅")
+        elif sensors_detected:
+            st.markdown("### 3️⃣")
+        else:
+            st.markdown("### ⬜")
+    with col2:
+        st.markdown("### Configure Sensors")
+        if not sensors_detected:
+            st.caption("Waiting for sensor detection")
+        elif not sensors_configured:
+            st.markdown("Great! Now let's configure your sensors.")
+            st.markdown("Click the **Setup** tab above to name your sensors and set temperature thresholds.")
+            
+            # Show detected sensors preview
+            try:
+                conn = get_connection()
+                cutoff = time.time() - 300
+                rows = conn.execute("""
+                    SELECT DISTINCT sensor_id FROM readings WHERE ts >= ?
+                """, (cutoff,)).fetchall()
+                conn.close()
+                
+                sensor_ids = [row[0] for row in rows]
+                st.caption(f"Detected: {', '.join(sensor_ids)}")
+            except Exception:
+                pass
+            
+            st.info("👆 Click the **⚙️ Setup** tab to continue")
+        else:
+            st.markdown(f"✓ Configured **{len(cfg.sensors)}** sensor(s)")
+    
+    st.divider()
+    
+    # Step 4: Complete
+    col1, col2 = st.columns([1, 20])
+    with col1:
+        if sensors_configured:
+            st.markdown("### 🎉")
+        else:
+            st.markdown("### ⬜")
+    with col2:
+        st.markdown("### All Set!")
+        if sensors_configured:
+            st.markdown("Your Watchdog is ready to monitor!")
+            st.markdown("You'll now see real-time data on this tab.")
+            
+            # Clear first-run state
+            st.balloons()
+            time.sleep(2)
+            st.rerun()
+        else:
+            st.caption("Complete the steps above")
+    
+    # Help section
+    st.divider()
+    with st.expander("🆘 Troubleshooting"):
+        st.markdown("""
+        **Sensors not detected?**
+        - Make sure sensors are powered on (batteries inserted)
+        - Bring sensors within 30 feet of the Raspberry Pi
+        - Wait up to 60 seconds for detection
+        - Try restarting the sensors (remove and reinsert batteries)
+        
+        **Bluetooth issues?**
+        - SSH to your Pi and run: `sudo bash ~/Watchdog/monitor/deploy/watchdog-bt-unblock.sh`
+        - Then restart monitoring
+        
+        **Need help?**
+        - Check the README in your Watchdog installation
+        - Visit our support documentation
+        """)
+    
+    return True  # Onboarding was rendered
+
 
 # ---------------------------------------------------------------------
 # Session guards (prevents "autostart" feel when a monitor is already running)
@@ -183,12 +389,20 @@ tab1, tab2, tab3 = st.tabs(["📊 Monitoring", "⚙️ Setup", "🔧 Settings"])
 # TAB 1: MONITORING (OSS-STYLE)
 # ====================
 with tab1:
-    # === Alarm banners (persistent alerts) ===
-    render_alarm_banners(cfg)
+    # === CRITICAL: Email system warning (must be first!) ===
+    from alarm_ui import render_email_system_warning
+    render_email_system_warning()
     # Check monitoring status
     status = get_monitoring_status()
     
-        # --------------------
+    # === First-run onboarding ===
+    if is_first_run(cfg):
+        if render_onboarding(cfg, status):
+            pass  # Onboarding rendered, skip normal content
+        # Note: render_onboarding handles its own st.stop() via rerun
+    
+    
+    # --------------------
     # System Health panel
     # --------------------
     health = get_system_health(window_s=300)
@@ -633,19 +847,37 @@ with tab1:
             # Auto-refresh while scanning: every 30s, up to 5 minutes.
             # After that, user can manually refresh if sensors are slow.
             # ---------------------------------------------------------
+            # Auto-refresh while scanning (non-blocking)
             if "scan_autorefresh_started_at" not in st.session_state:
                 st.session_state.scan_autorefresh_started_at = time.time()
-
+            
             elapsed = time.time() - st.session_state.scan_autorefresh_started_at
             remaining = max(0, 300 - int(elapsed))
-
+            
             # Only auto-refresh for 5 minutes
             if elapsed < 300:
-                st.caption(f"Auto-refresh enabled while scanning ({remaining}s remaining).")
-                time.sleep(30)
-                st.rerun()
+                st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
+                
+                # Non-blocking refresh using Streamlit's HTML component
+                refresh_html = """
+                <script>
+                    setTimeout(function() {
+                        window.parent.location.reload();
+                    }, 15000);
+                </script>
+                <noscript>
+                    <meta http-equiv="refresh" content="15">
+                </noscript>
+                """
+                st.components.v1.html(refresh_html, height=0)
+                
+                # Show manual refresh button in case user doesn't want to wait
+                if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
+                    st.rerun()
             else:
-                st.info("Auto-refresh stopped after 5 minutes. If sensors are still not detected, refresh the page.")
+                st.info("Auto-refresh stopped after 5 minutes. Click below to refresh manually.")
+                if st.button("🔄 Refresh Page", key="manual_refresh_timeout"):
+                    st.rerun()
         else:
             # Reset scanning timer when monitoring isn't running
             st.session_state.pop("scan_autorefresh_started_at", None)
@@ -711,20 +943,33 @@ with tab2:
             st.warning("No sensors detected yet. This can take ~10–30 seconds after starting monitoring.")
 
             # ---------------------------------------------------------
-            # Auto-refresh while scanning: every 30s, up to 5 minutes.
+            # Auto-refresh while scanning
             # ---------------------------------------------------------
+
             if "setup_autorefresh_started_at" not in st.session_state:
                 st.session_state.setup_autorefresh_started_at = time.time()
-
+            
             elapsed = time.time() - st.session_state.setup_autorefresh_started_at
             remaining = max(0, 300 - int(elapsed))
-
+            
             if elapsed < 300:
-                st.caption(f"Auto-refresh enabled while scanning ({remaining}s remaining).")
-                time.sleep(30)
-                st.rerun()
+                st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
+                
+                refresh_html = """
+                <script>
+                    setTimeout(function() {
+                        window.parent.location.reload();
+                    }, 15000);
+                </script>
+                """
+                st.components.v1.html(refresh_html, height=0)
+                
+                if st.button("🔄 Refresh Now", key="setup_manual_refresh"):
+                    st.rerun()
             else:
-                st.info("Auto-refresh stopped after 5 minutes. If sensors are still not detected, refresh the page.")        
+                st.info("Auto-refresh stopped. Click below to check for sensors.")
+                if st.button("🔄 Refresh Page", key="setup_manual_timeout"):
+                    st.rerun()       
         
         else:
             st.session_state.pop("setup_autorefresh_started_at", None)

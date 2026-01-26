@@ -27,6 +27,110 @@ from discovery import (
 __version__ = "1.0.0"
 APP_NAME = "Watchdog"
 
+# Health monitor JavaScript - injected into webview after dashboard loads
+HEALTH_MONITOR_JS = '''
+(function() {
+    // Prevent double-injection
+    if (window.__watchdogHealthMonitor) return;
+    window.__watchdogHealthMonitor = true;
+    
+    const PI_IP = '%s';
+    const HEALTH_URL = 'http://' + PI_IP + ':8502/health';
+    const CHECK_INTERVAL_MS = 60000;  // 60 seconds
+    const FAILURE_THRESHOLD = 2;  // Require 2 consecutive failures before showing warning
+    
+    // Create fixed warning banner (hidden by default)
+    const banner = document.createElement('div');
+    banner.id = 'watchdog-offline-warning';
+    banner.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: linear-gradient(90deg, #dc2626, #b91c1c);
+        color: white;
+        padding: 16px 24px;
+        text-align: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 15px;
+        font-weight: 600;
+        z-index: 999999;
+        display: none;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        letter-spacing: 0.3px;
+    `;
+    document.body.appendChild(banner);
+    
+    // Shift page content down when banner is visible
+    const style = document.createElement('style');
+    style.textContent = `
+        #watchdog-offline-warning[data-visible="true"] ~ * {
+            margin-top: 52px;
+        }
+    `;
+    document.head.appendChild(style);
+    
+    let consecutiveFailures = 0;
+    let lastSuccessTime = Date.now();
+    
+    async function checkHealth() {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            
+            const resp = await fetch(HEALTH_URL, {
+                signal: controller.signal,
+                cache: 'no-cache',
+                mode: 'cors'
+            });
+            clearTimeout(timeout);
+            
+            if (resp.ok) {
+                const data = await resp.json();
+                
+                if (data.daemon_running) {
+                    // All good - reset failures and hide banner
+                    consecutiveFailures = 0;
+                    lastSuccessTime = Date.now();
+                    banner.style.display = 'none';
+                    banner.removeAttribute('data-visible');
+                } else {
+                    // Daemon not running
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= FAILURE_THRESHOLD) {
+                        banner.innerHTML = '⚠️ <strong>Monitoring service is STOPPED</strong> — ' +
+                            'Temperature alerts are NOT being sent. ' +
+                            '<span style="opacity:0.85">Start monitoring on your Raspberry Pi.</span>';
+                        banner.style.display = 'block';
+                        banner.setAttribute('data-visible', 'true');
+                    }
+                }
+            } else {
+                throw new Error('HTTP ' + resp.status);
+            }
+        } catch (err) {
+            // Can't reach health endpoint
+            consecutiveFailures++;
+            if (consecutiveFailures >= FAILURE_THRESHOLD) {
+                const elapsedSec = Math.round((Date.now() - lastSuccessTime) / 1000);
+                const elapsedStr = elapsedSec > 120 
+                    ? Math.round(elapsedSec / 60) + ' min' 
+                    : elapsedSec + 's';
+                banner.innerHTML = '⚠️ <strong>Cannot reach Watchdog</strong> (last seen ' + elapsedStr + ' ago) — ' +
+                    '<span style="opacity:0.85">Check if your Raspberry Pi is powered on.</span>';
+                banner.style.display = 'block';
+                banner.setAttribute('data-visible', 'true');
+            }
+        }
+    }
+    
+    // Start health checks after a short delay (let dashboard load)
+    setTimeout(checkHealth, 10000);  // First check after 10s
+    setInterval(checkHealth, CHECK_INTERVAL_MS);
+    
+    console.log('[Watchdog] Health monitor active for ' + PI_IP);
+})();
+'''
 
 class WatchdogApp:
     """Main application controller."""
@@ -36,7 +140,20 @@ class WatchdogApp:
         self.window: Optional[webview.Window] = None
         self._current_ip: Optional[str] = None
         self._health_check_interval = 30  # seconds
+    
+    def _inject_health_monitor(self, ip: str):
+        """Inject JavaScript health monitor into the webview after dashboard loads."""
+        if getattr(self, '_health_monitor_injected', False):
+            return  # Already injected
         
+        if self.window:
+            try:
+                js_code = HEALTH_MONITOR_JS % ip
+                self.window.evaluate_js(js_code)
+                self._health_monitor_injected = True
+            except Exception as e:
+                print(f"[watchdog] Health monitor injection failed: {e}")
+                
     def get_saved_ip(self) -> Optional[str]:
         """Quick check for saved IP only (no network calls)."""
         return self.config.get("watchdog_ip")
@@ -559,6 +676,16 @@ class SetupAPI:
             self.app.window.load_url(f"http://{ip}:8501")
             self.app.window.resize(1200, 800)
             self.app.window.set_title(APP_NAME)
+            
+            # Inject health monitor after dashboard loads
+            def delayed_inject():
+                import time
+                time.sleep(4)  # Wait for Streamlit to fully render
+                self.app._inject_health_monitor(ip)
+            
+            import threading
+            threading.Thread(target=delayed_inject, daemon=True).start()
+            
             return {"success": True, "monitoring_active": True}
         
         # Case 2: Dashboard up but daemon NOT running - require acknowledgment
@@ -597,6 +724,16 @@ class SetupAPI:
         self.app.window.load_url(f"http://{ip}:8501")
         self.app.window.resize(1200, 800)
         self.app.window.set_title(f"{APP_NAME} ⚠️ Monitoring Stopped")
+        
+        # Still inject health monitor to detect when service comes back online
+        def delayed_inject():
+            import time
+            time.sleep(4)
+            self.app._inject_health_monitor(ip)
+        
+        import threading
+        threading.Thread(target=delayed_inject, daemon=True).start()
+        
         return {"success": True, "monitoring_active": False}
     
     def quit(self):

@@ -43,10 +43,11 @@ _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
 _log_core = get_logger("watchdog.core")
 
-# Maximum retries for BLE adapter initialization
-BLE_ADAPTER_MAX_RETRIES = 10
-BLE_ADAPTER_RETRY_DELAY_BASE = 5  # seconds, will use exponential backoff
 
+# BLE adapter initialization - fail fast at startup, recover in main loop
+BLE_ADAPTER_STARTUP_RETRIES = 3      # Quick initial check (fail fast)
+BLE_ADAPTER_STARTUP_DELAY = 5        # Seconds between startup retries
+BLE_ADAPTER_RECOVERY_DELAY = 30      # Seconds between recovery attempts in main loop
 
 class WatchdogMonitor:
     """
@@ -131,43 +132,114 @@ class WatchdogMonitor:
 
     def _wait_for_ble_adapter(self) -> bool:
         """
-        Wait for BLE adapter to become available with exponential backoff.
+        Quick check for BLE adapter availability at startup.
+        
+        DESIGN: Fail fast at startup (3 attempts, 15s max), then let main loop
+        handle ongoing recovery. This prevents 7+ minute startup delays.
         
         Returns:
-            True if adapter is available, False if max retries exceeded
+            True if adapter is available, False if not ready yet
         """
-        for attempt in range(BLE_ADAPTER_MAX_RETRIES):
-            _log_ble.info("Checking BLE adapter (attempt %d/%d)...", 
-                         attempt + 1, BLE_ADAPTER_MAX_RETRIES)
+        for attempt in range(BLE_ADAPTER_STARTUP_RETRIES):
+            _log_ble.info(
+                "Checking BLE adapter (attempt %d/%d)...", 
+                attempt + 1, BLE_ADAPTER_STARTUP_RETRIES
+            )
             
             status = check_ble_adapter_sync()
             
             if status.get('available', False):
-                _log_ble.info("BLE adapter available")
+                _log_ble.info("✓ BLE adapter ready")
                 return True
             
             error_msg = status.get('error', 'Unknown error')
             error_type = status.get('error_type', 'unknown')
             
-            _log_ble.warning("BLE adapter not available: %s (type: %s)", 
-                            error_msg, error_type)
+            _log_ble.warning(
+                "BLE adapter not ready: %s (type: %s)", 
+                error_msg, error_type
+            )
             
-            if attempt < BLE_ADAPTER_MAX_RETRIES - 1:
-                # Exponential backoff: 5, 10, 20, 40... capped at 60 seconds
-                delay = min(BLE_ADAPTER_RETRY_DELAY_BASE * (2 ** attempt), 60)
-                _log_ble.info("Retrying in %d seconds...", delay)
+            # Log helpful troubleshooting for common issues
+            if error_type == 'no_adapter':
+                _log_ble.warning(
+                    "→ No Bluetooth adapter found. For Pi Zero 2 W, ensure USB BT adapter is connected."
+                )
+            elif error_type == 'dbus_error':
+                _log_ble.warning(
+                    "→ D-Bus error. Try: sudo systemctl restart bluetooth"
+                )
+            elif error_type == 'permission_error':
+                _log_ble.warning(
+                    "→ Permission denied. Ensure user is in 'bluetooth' group."
+                )
+            
+            if attempt < BLE_ADAPTER_STARTUP_RETRIES - 1:
+                _log_ble.info("Retrying in %ds...", BLE_ADAPTER_STARTUP_DELAY)
                 
                 # Check for shutdown during wait
-                for _ in range(int(delay)):
+                for _ in range(BLE_ADAPTER_STARTUP_DELAY):
                     if not self.running:
                         _log_ble.info("Shutdown requested during BLE adapter wait")
                         return False
                     time.sleep(1)
         
-        _log_ble.error("BLE adapter not available after %d attempts", 
-                      BLE_ADAPTER_MAX_RETRIES)
+        # Failed all startup attempts - but don't give up!
+        # Log prominent message and let main loop continue trying
+        _log_ble.warning(
+            "=" * 60 + "\n"
+            "BLE adapter not ready after %d attempts.\n"
+            "Will continue trying in background.\n"
+            "Troubleshooting:\n"
+            "  1. Check adapter: lsusb | grep -i bluetooth\n"
+            "  2. Check service: systemctl status bluetooth\n"
+            "  3. Unblock: sudo rfkill unblock bluetooth\n"
+            "  4. Restart: sudo systemctl restart bluetooth\n"
+            "=" * 60,
+            BLE_ADAPTER_STARTUP_RETRIES
+        )
+        
+        # Create a system alarm so users see this in the dashboard
+        self._create_ble_alarm("BLE adapter not ready - monitoring delayed. Check Bluetooth on your Pi.")
+        
         return False
     
+    
+    def _create_ble_alarm(self, message: str):
+        """Create a system alarm for BLE issues visible in dashboard."""
+        try:
+            from alert_engine import PersistentAlarmStore, Severity
+            from storage import get_db_path
+            
+            store = PersistentAlarmStore(get_db_path())
+            store.upsert_alarm(
+                sensor_id="SYSTEM",
+                alert_type="ble_error",
+                sensor_name="Bluetooth",
+                severity=Severity.CRITICAL,
+                message=message,
+            )
+            _log_ble.info("Created BLE system alarm")
+        except Exception as e:
+            _log_ble.warning("Could not create BLE alarm: %s", e)
+    
+    def _clear_ble_alarm(self):
+        """Clear BLE system alarm when adapter becomes available."""
+        try:
+            from alert_engine import PersistentAlarmStore, Severity
+            from storage import get_db_path
+            
+            store = PersistentAlarmStore(get_db_path())
+            store.upsert_alarm(
+                sensor_id="SYSTEM",
+                alert_type="ble_error",
+                sensor_name="Bluetooth",
+                severity=Severity.NONE,
+                message="",
+            )
+        except Exception:
+            pass  # Best effort
+            
     def _watchdog_thread_func(self):
         """
         Watchdog monitoring thread.
@@ -274,17 +346,17 @@ class WatchdogMonitor:
         _log_core.info("Alert engine started (checking every 60s)")
         print("[watchdog] Alert engine started - notifications will work 24/7", file=sys.stderr, flush=True)
         
-        # Wait for BLE adapter before starting scanner
-        if not self._wait_for_ble_adapter():
-            if not self.running:
-                # Shutdown was requested during adapter wait
-                _log_core.info("Shutdown requested before BLE adapter ready")
-                self._shutdown_reason = "shutdown_during_ble_wait"
-                self.stop()
-                return
-            else:
-                # Adapter never became available - keep trying in main loop
-                _log_core.warning("BLE adapter not ready, will retry in main loop")
+        # Quick check for BLE adapter (fail fast, recover in loop)
+        ble_ready = self._wait_for_ble_adapter()
+        
+        if not self.running:
+            _log_core.info("Shutdown requested during startup")
+            self._shutdown_reason = "shutdown_during_startup"
+            self.stop()
+            return
+        
+        if not ble_ready:
+            _log_core.warning("BLE adapter not ready at startup, will keep trying in main loop")
         
         # Start watchdog thread
         if self.cfg.monitoring.watchdog_enabled:
@@ -304,7 +376,22 @@ class WatchdogMonitor:
             
             while self.running:
                 # Start OSS scanner with database callback
-                _log_ble.info("Starting BLE scanner (restart #%d)...", restart_count)
+                _log_ble.info("Starting BLE scanner (attempt #%d)...", restart_count)
+                
+                # Re-check BLE adapter before each attempt
+                if not check_ble_adapter_sync().get('available', False):
+                    _log_ble.warning("BLE adapter still not available, waiting %ds...", BLE_ADAPTER_RECOVERY_DELAY)
+                    self._create_ble_alarm("Bluetooth adapter not available - waiting for hardware")
+                    
+                    for _ in range(BLE_ADAPTER_RECOVERY_DELAY):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+                    restart_count += 1
+                    continue
+                
+                # Clear any previous BLE alarm since adapter is now available
+                self._clear_ble_alarm()
                 
                 try:
                     # Use validated OSS scanner with our callback
