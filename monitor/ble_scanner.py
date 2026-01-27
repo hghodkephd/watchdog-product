@@ -287,6 +287,7 @@ class GoveeScanner:
         """
         self.callback = callback
         self._scanner = None
+        self._error_count = 0
     
     def _detection_callback(self, device, advertisement_data):
         """
@@ -349,7 +350,12 @@ class GoveeScanner:
                 self.callback(reading)
         
         except Exception:
-            _log_ble.exception("Error processing advertisement")
+            _log_ble.exception("Error processing advertisement from %s", 
+                              getattr(device, 'address', 'unknown'))
+            # Track error frequency for alerting
+            self._error_count = getattr(self, '_error_count', 0) + 1
+            if self._error_count % 100 == 0:
+                _log_ble.error("BLE callback has failed %d times", self._error_count)
     
     async def start(self):
         """

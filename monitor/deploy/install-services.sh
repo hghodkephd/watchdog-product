@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+
 # --------------------------------------------
 # Watchdog - install systemd services
 # Run: sudo ./install-services.sh
@@ -23,6 +24,29 @@ WATCHDOG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Install-time user/group (assumes you ran via sudo as the target user)
 WATCHDOG_USER="${SUDO_USER:-$(id -un)}"
 WATCHDOG_GROUP="$(id -gn "$WATCHDOG_USER")"
+
+# --- Prerequisite checks ------------------------------------
+
+# Check python3 exists
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 not found. Install Python 3.9+ and rerun."
+  exit 1
+fi
+
+# Check Python version >= 3.9
+if ! python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,9) else 1)"; then
+  echo "ERROR: Python 3.9+ required. Found: $(python3 --version 2>&1)"
+  exit 1
+fi
+
+# Check venv exists (skip for dry run)
+if [ "${DRY_RUN:-0}" -ne 1 ] && [ ! -f "$WATCHDOG_DIR/venv/bin/activate" ]; then
+  echo "ERROR: Virtual environment not found at: $WATCHDOG_DIR/venv/"
+  echo "Run setup.sh first, then rerun install-services.sh."
+  exit 1
+fi
+
+# -----------------------------------------------------------
 
 SERVICE_DIR="/etc/systemd/system"
 

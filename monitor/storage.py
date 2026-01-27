@@ -60,6 +60,12 @@ WAL_CHECKPOINT_INTERVAL_S = 300  # 5 minutes
 
 # Checkpoint when WAL exceeds this size
 WAL_MAX_MB = 64  # conservative; tune later if needed
+# Minimum free disk space required to keep writing to SQLite.
+# When free space drops below this, the DatabaseWriter will pause writes and drop readings
+# to avoid crashing on 'database or disk is full' errors.
+DISK_MIN_FREE_MB_FOR_WRITES = 50
+# Hysteresis: resume writing once free space recovers to at least this amount.
+DISK_RESUME_FREE_MB_FOR_WRITES = 200
 
 
 def _wal_path(db_path: Path) -> Path:
@@ -285,12 +291,28 @@ class DatabaseWriter:
         self.total_writes = 0
         self.total_batches = 0
         self.errors = 0
-        self.dropped_readings = 0
+        self._dropped_lock = threading.Lock()
+        self._dropped_readings = 0
         
         # WAL checkpointing state
         self._last_checkpoint_ts = 0.0
         self._checkpoint_interval_s = WAL_CHECKPOINT_INTERVAL_S
         self._wal_max_mb = WAL_MAX_MB
+        
+        # Disk-space protection (graceful degradation when storage is low)
+        self._writes_paused_low_disk = False
+        self._writes_paused_since_ts: Optional[float] = None
+        self._last_disk_check_ts = 0.0
+        self._last_low_disk_log_ts = 0.0
+    
+    @property
+    def dropped_readings(self):
+        with self._dropped_lock:
+            return self._dropped_readings
+        
+    def _increment_dropped(self, count: int = 1):
+        with self._dropped_lock:
+            self._dropped_readings += count
 
     def start(self) -> None:
         """
@@ -348,7 +370,7 @@ class DatabaseWriter:
         try:
             self._queue.put_nowait(reading)
         except queue.Full:
-            self.dropped_readings += 1  # Track dropped readings
+            self._increment_dropped(1)  # Track dropped readings
             logger.warning(
                 "DatabaseWriter queue full; dropping reading (total dropped: %d)",
                 self.dropped_readings
@@ -360,8 +382,49 @@ class DatabaseWriter:
             try:
                 self._queue.put_nowait(reading)
             except queue.Full:
-                self.dropped_readings += 1
-                logger.warning("DatabaseWriter queue still full; dropping new reading")
+                self._increment_dropped(1)
+                logger.warning(
+                    "DatabaseWriter queue still full; dropping new reading (total dropped: %d)",
+                    self.dropped_readings,
+                )
+                
+    def _check_disk_free_mb(self) -> float:
+        """Return free disk space (MB) for the partition containing the DB."""
+        try:
+            usage = shutil.disk_usage(self.db_path.parent)
+            return usage.free / (1024 ** 2)
+        except Exception:
+            # If we cannot determine disk usage, fail closed by returning 0.
+            return 0.0
+
+    def _maybe_pause_or_resume_writes(self) -> None:
+        """Pause DB writes when disk space is dangerously low; resume when recovered."""
+        now = time.time()
+        # Rate-limit disk checks to avoid hot-looping
+        if (now - self._last_disk_check_ts) < 5.0:
+            return
+        self._last_disk_check_ts = now
+
+        free_mb = self._check_disk_free_mb()
+
+        if (not self._writes_paused_low_disk) and (free_mb < DISK_MIN_FREE_MB_FOR_WRITES):
+            self._writes_paused_low_disk = True
+            self._writes_paused_since_ts = now
+            self._last_low_disk_log_ts = now
+            logger.error(
+                "Disk space critically low (%.0f MB free). Pausing DB writes to prevent crashes.",
+                free_mb
+            )
+            return
+
+        if self._writes_paused_low_disk and (free_mb >= DISK_RESUME_FREE_MB_FOR_WRITES):
+            paused_for = now - (self._writes_paused_since_ts or now)
+            self._writes_paused_low_disk = False
+            self._writes_paused_since_ts = None
+            logger.info(
+                "Disk space recovered (%.0f MB free). Resuming DB writes (paused for %.0fs).",
+                free_mb, paused_for
+            )
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -422,6 +485,21 @@ class DatabaseWriter:
                     batch.append(self._queue.get_nowait())
                 except queue.Empty:
                     break
+            
+            # Disk-space protection: pause writes and drop readings when storage is low
+            self._maybe_pause_or_resume_writes()
+            if self._writes_paused_low_disk:
+                self.dropped_readings += len(batch)
+                now = time.time()
+                # Log at most once per minute while paused
+                if (now - self._last_low_disk_log_ts) >= 60.0:
+                    free_mb = self._check_disk_free_mb()
+                    logger.error(
+                        "Still low disk (%.0f MB free). Dropping %d readings (total dropped: %d).",
+                        free_mb, len(batch), self.dropped_readings
+                    )
+                    self._last_low_disk_log_ts = now
+                continue
 
             # write batch
             try:

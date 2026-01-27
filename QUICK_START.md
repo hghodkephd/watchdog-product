@@ -1,94 +1,86 @@
 # Watchdog Quick Start (v1.0)
 
-This is the fastest path from “out of the box” to reliable 24/7 monitoring + email alerts.
+This guide gets you from **power-on → reliable 24/7 monitoring with alerts** in a few minutes.
 
-## What you need
-- A powered **Raspberry Pi running Watchdog** (pre-flashed SD card image or installed via `deploy.sh`)
-- Your computer on the **same Wi‑Fi / LAN** as the Pi
-- Optional: one or more **Govee BLE sensors** (or supported BLE sensors)
+Watchdog runs locally on your Raspberry Pi. Once started, it continues monitoring even if the dashboard is closed.
 
 ---
 
-## 1) Power on + find Watchdog
-1. Power on the Pi and wait ~60–120 seconds.
-2. On your computer, open the **Watchdog Desktop App**.
-
-**If discovery works:** you’ll be taken to the dashboard automatically.
-
-**If discovery fails:** open the dashboard in a browser:
-- Try: `http://watchdog.local:8501`
-- Or: `http://<PI_IP>:8501`
-
-> Tip: You can usually find the Pi’s IP in your router’s “connected devices” list.
+## What You Need
+- A **Raspberry Pi running Watchdog**
+  - Pre-flashed SD card image **or**
+  - Installed via `deploy.sh`
+- Your computer on the **same Wi-Fi / LAN** as the Pi
+- Optional: one or more **Bluetooth (BLE) sensors**
+  - e.g. Govee temperature / humidity sensors
 
 ---
 
-## 2) Start monitoring
-In the dashboard, go to **Monitoring** and click **Start**.
+## 1) Power On + Find Watchdog
 
-- You should see “Scanning…” while readings begin to populate.
-- If you see alarms/banners, they’re actionable—click through or silence as needed.
+1. Power on the Raspberry Pi
+2. Wait **~60–120 seconds** for startup
+3. On your computer, open the **Watchdog Desktop App**
 
----
+**If discovery succeeds:**  
+You’ll be taken directly to the dashboard.
 
-## 3) Add sensors (first time only)
-1. Go to **Setup**.
-2. Click **Detect Sensors** (leave it running for ~30–60 seconds).
-3. Select the sensors you want Watchdog to track and **Save**.
+**If discovery fails:**  
+Open a browser and try one of the following:
+- `http://watchdog.local:8501`
+- `http://<PI_IP>:8501`
 
-If a sensor doesn’t show up:
-- Move it closer to the Pi (BLE range can be short through walls).
-- Confirm the sensor has battery and is actively reporting.
-- Make sure monitoring is running.
+> Tip: You can usually find the Pi’s IP address in your router’s “connected devices” list.
 
 ---
 
-## 4) Configure email alerts
-1. Go to **Settings → Email Notifications**.
-2. Enter sender email + recipient email.
-3. Click **Test Email**.
-4. Set your **temperature/humidity thresholds** per sensor.
+## 2) Start Monitoring
 
-### Common email setup notes
-- **Gmail** typically requires an **App Password** (not your normal password).
-- Some providers block SMTP by default; check your provider’s “app password” / “SMTP” settings.
+1. Open the **Monitoring** tab
+2. Click **Start**
 
----
+What you should see:
+- Status changes to **Scanning…**
+- Sensor readings begin appearing automatically
+- Any alerts will appear as banners at the top
 
-## 5) Confirm the system is healthy
-- Dashboard: **System Health** section
-- Health endpoint (optional): `http://<PI_IP>:8502/health`
+> Monitoring runs in the background once started.  
+> You do **not** need to keep the dashboard open.
 
 ---
 
-# Troubleshooting (fast)
-## “Desktop app can’t find Watchdog”
-- Confirm computer and Pi are on the **same Wi‑Fi/LAN**
-- Try opening: `http://watchdog.local:8501`
-- Or use the Pi’s IP: `http://<PI_IP>:8501`
-- Reboot the Pi if needed
+## 3) Add Sensors (First Time Only)
 
-## “No sensors detected”
-- Ensure monitoring is running
-- Move sensors closer
-- Wait 30–60 seconds and re-run **Detect Sensors**
-- BLE can be affected by distance, walls, metal racks, and water (aquariums)
+1. Go to **Setup**
+2. Click **Detect Sensors**
+3. Leave detection running for **30–60 seconds**
+4. Select the sensors you want Watchdog to track
+5. Click **Save**
 
-## “Email test failed” / “No alerts arriving”
-- Double-check sender credentials
-- For Gmail: use an **App Password**
-- Verify your SMTP host/port settings (if configurable)
-- Watchdog will surface an alarm if email is repeatedly failing (circuit breaker)
-
-## “Dashboard loads but looks empty”
-- Click **Start** on Monitoring
-- Add sensors in **Setup**
-- Wait for first readings (auto-refresh may be active)
+If a sensor doesn’t appear:
+- Move it closer to the Pi (BLE range is limited through walls)
+- Confirm the sensor has battery and is actively reporting
+- Make sure monitoring is running
 
 ---
 
-## Support info to include when reporting a bug
-- Pi model + OS image (or install method)
-- Watchdog version
-- Desktop OS (macOS/Windows/Linux)
-- A screenshot of **System Health** and any alarms
+## 4) Configure Email Alerts (Optional but Recommended)
+
+1. Go to **Settings → Email Notifications**
+2. Enter sender and recipient email addresses
+3. Click **Test Email**
+4. Configure temperature / humidity thresholds per sensor
+
+### Common Email Setup Notes
+- **Gmail** requires an **App Password** (not your normal password)
+- Some providers block SMTP by default — check provider settings
+- Watchdog includes a safety circuit breaker if email repeatedly fails
+
+---
+
+## 5) Confirm System Health
+
+You can verify everything is running correctly in two ways:
+
+- **Dashboard:** System Health section
+- **Health endpoint (optional):**

@@ -29,7 +29,7 @@ from alarm_ui import render_alarm_banners, process_alerts_and_notify, render_ema
 from config import EmailConfig
 from notifications import send_test_email, send_alarm_email, send_cleared_email
 
-
+SETUP_DETECTION_WINDOW_SEC = 900
 
 # -----------------------------------------------------------------------------
 # P0 performance: cached trends queries
@@ -575,6 +575,7 @@ with tab1:
         if df_latest.empty:
             if not is_running:
                 st.session_state.pop("scan_autorefresh_started_at", None)
+                st.session_state.pop("scan_refresh", None)
                 st.info("👆 Click **Start** to begin monitoring")
             else:
                 # Auto-refresh while scanning
@@ -588,14 +589,8 @@ with tab1:
                     st.warning("Waiting for sensor data... This can take 10-30 seconds after starting.")
                     st.caption(f"Auto-refresh in 15s ({remaining}s until timeout)...")
                     
-                    refresh_html = """
-                    <script>
-                        setTimeout(function() {
-                            window.parent.location.reload();
-                        }, 15000);
-                    </script>
-                    """
-                    st.components.v1.html(refresh_html, height=0)
+                    # Streamlit-native auto-refresh (no full page reload)
+                    st_autorefresh(interval=15_000, limit=20, key="scan_refresh")
                     
                     if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
                         st.rerun()
@@ -606,6 +601,7 @@ with tab1:
         else:
             # We have data - render the main dashboard
             st.session_state.pop("scan_autorefresh_started_at", None)
+            st.session_state.pop("scan_refresh", None)
             
             # Determine what to display
             detected_ids = set(df_latest["sensor_id"].unique())
@@ -774,7 +770,7 @@ with tab2:
         init_db(conn)
 
         # Use a wider window for setup so sensors have time to appear on first run
-        cutoff = time.time() - 900  # last 15 minutes
+        cutoff = time.time() - SETUP_DETECTION_WINDOW_SEC  # last 15 minutes
         start_ts = cutoff
         end_ts = time.time()
 
@@ -821,14 +817,8 @@ with tab2:
             if elapsed < 300:
                 st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
                 
-                refresh_html = """
-                <script>
-                    setTimeout(function() {
-                        window.parent.location.reload();
-                    }, 15000);
-                </script>
-                """
-                st.components.v1.html(refresh_html, height=0)
+                # Streamlit-native refresh (no full-page reload)
+                st_autorefresh(interval=15_000, limit=20, key="setup_scan_refresh")
                 
                 if st.button("🔄 Refresh Now", key="setup_manual_refresh"):
                     st.rerun()
@@ -839,8 +829,11 @@ with tab2:
         
         else:
             st.session_state.pop("setup_autorefresh_started_at", None)
+            st.session_state.pop("setup_scan_refresh", None)
             st.info("Start monitoring to detect sensors.")
     else:
+        st.session_state.pop("setup_autorefresh_started_at", None)
+        st.session_state.pop("setup_scan_refresh", None)
         configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
         detected_ids = detected_df["sensor_id"].tolist()
 

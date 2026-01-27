@@ -19,6 +19,7 @@ RestartSec=30s
 Environment=PYTHONUNBUFFERED=1
 
 MemoryMax=384M
+CPUQuota=50%
 OOMScoreAdjust=500
 Nice=0
 

@@ -201,7 +201,7 @@ class WatchdogApp:
         # Get platform-specific help text
         help_text = get_discovery_help().replace('\n', '\\n').replace("'", "\\'")
         
-        return f"""
+        html = """
         <!DOCTYPE html>
         <html>
         <head>
@@ -579,6 +579,7 @@ class WatchdogApp:
         </body>
         </html>
         """
+        return (html.replace("__SAVED_IP__", saved_ip).replace("__HELP_TEXT__", help_text))
     
     def run(self):
         """Main entry point - shows UI immediately, discovery in background."""
@@ -660,10 +661,14 @@ class SetupAPI:
         
         # Fall back to parallel scan of common IPs
         common_ips = [
-            "192.168.0.21", "192.168.1.21",
-            "192.168.0.100", "192.168.1.100",
-            "10.0.0.21", "10.0.0.100",
-        ]
+             "192.168.0.21", "192.168.1.21",
+             "192.168.0.100", "192.168.1.100",
+             "10.0.0.21", "10.0.0.100",
+         ]
+        # Prefer last-known IP if we have one (helps when mDNS fails on some networks)
+        saved_ip = self.app.get_saved_ip()  # stored as "watchdog_ip"
+        if saved_ip and saved_ip not in common_ips:
+            common_ips = [saved_ip] + common_ips
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {

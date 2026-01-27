@@ -1,7 +1,7 @@
 [Unit]
 Description=Watchdog Environmental Monitor - BLE Service
-After=network-online.target bluetooth.target
-Wants=network-online.target bluetooth.target
+After=network-online.target bluetooth.service
+Wants=network-online.target bluetooth.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -22,6 +22,7 @@ RestartSec=10s
 Environment=PYTHONUNBUFFERED=1
 
 MemoryMax=256M
+CPUQuota=80%
 # Strongly protect the monitor daemon from OOM kills.
 # The dashboard service should be killed first if memory pressure occurs.
 OOMScoreAdjust=-500

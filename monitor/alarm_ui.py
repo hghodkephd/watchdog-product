@@ -496,19 +496,3 @@ def render_notification_log(limit: int = 20):
     
     except Exception as e:
         st.error(f"Could not load notification log: {e}")
-
-
-# =============================================================================
-# DEPRECATED: process_alerts_and_notify
-# =============================================================================
-
-def process_alerts_and_notify(alerts, cfg, email_config):
-    """
-    DEPRECATED: Alert processing now happens in the background daemon.
-    
-    This function is kept for backward compatibility but does nothing.
-    The AlertEngine in ble_watchdog.py handles all alert processing and
-    notification sending 24/7, regardless of dashboard state.
-    """
-    # No-op - alerts are processed by the daemon's AlertEngine
-    pass
