@@ -162,11 +162,25 @@ def render_onboarding(cfg, status):
         st.markdown("### Start Monitoring")
         if not monitoring_running:
             st.markdown("Click the button below to power on the Bluetooth scanner.")
+
+        # If we recently requested monitoring to start, poll (non-blocking) until it flips to running.
+        if "onboard_start_requested_at" in st.session_state:
+            elapsed = time.time() - st.session_state.onboard_start_requested_at
+            if monitoring_running:
+                st.session_state.pop("onboard_start_requested_at", None)
+            elif elapsed < 10:  # 10s max wait
+                st.caption(f"Starting monitoring... auto-refreshing ({int(10 - elapsed)}s remaining)")
+                st_autorefresh(interval=500, limit=20, key="onboard_start_refresh")
+            else:
+                st.session_state.pop("onboard_start_requested_at", None)
+                st.warning("Monitoring is taking longer than expected. If it doesn’t start, try again.")
+
             if st.button("▶️ Start Monitoring", type="primary", key="onboard_start"):
                 success, msg, pid = start_monitoring()
                 if success:
                     st.success(msg)
-                    time.sleep(2)
+                    # Trigger short polling window instead of blocking sleep
+                    st.session_state.onboard_start_requested_at = time.time()
                     st.rerun()
                 else:
                     st.error(msg)
@@ -192,13 +206,25 @@ def render_onboarding(cfg, status):
             st.markdown("Scanning for Govee sensors... This usually takes 10-30 seconds.")
             st.markdown("Make sure your sensors are powered on and within range (~30 feet).")
             
-            # Auto-refresh while scanning
-            with st.spinner("Scanning for sensors..."):
-                st.caption("This page will refresh automatically.")
-                time.sleep(10)
-                st.rerun()
+
+            # Use st_autorefresh instead of blocking sleep
+            if "onboard_scan_started_at" not in st.session_state:
+                st.session_state.onboard_scan_started_at = time.time()
+
+            elapsed = time.time() - st.session_state.onboard_scan_started_at
+            if elapsed < 120:  # 2 minute timeout
+                st.caption(f"Auto-refresh in 10s... ({int(120 - elapsed)}s until timeout)")
+                st_autorefresh(interval=10_000, limit=12, key="onboard_scan_refresh")
+                if st.button("🔄 Refresh Now", key="onboard_manual_refresh"):
+                    st.rerun()
+            else:
+                st.info("Auto-refresh stopped after 2 minutes. Click below to refresh manually.")
+                if st.button("🔄 Refresh Page", key="onboard_refresh_timeout"):
+                    st.rerun()
         else:
             st.markdown(f"✓ Found **{detected_count}** sensor(s)")
+            st.session_state.pop("onboard_scan_started_at", None)
+            st.session_state.pop("onboard_scan_refresh", None)
     
     st.divider()
     
@@ -254,8 +280,16 @@ def render_onboarding(cfg, status):
             
             # Clear first-run state
             st.balloons()
-            time.sleep(2)
-            st.rerun()
+            if "onboard_complete_at" not in st.session_state:
+                st.session_state.onboard_complete_at = time.time()
+    
+            elapsed = time.time() - st.session_state.onboard_complete_at
+            if elapsed < 2:
+                st.caption("Finalizing setup...")
+                st_autorefresh(interval=500, limit=4, key="onboard_complete_refresh")
+            else:
+                st.session_state.pop("onboard_complete_at", None)
+                st.rerun()
         else:
             st.caption("Complete the steps above")
     

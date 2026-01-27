@@ -18,7 +18,8 @@ ExecStart=__WATCHDOG_DIR__/venv/bin/python ble_watchdog.py
 
 Restart=always
 RestartSec=10s
-
+WatchdogSec=120
+NotifyAccess=main
 Environment=PYTHONUNBUFFERED=1
 
 MemoryMax=256M

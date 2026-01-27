@@ -1,4 +1,8 @@
 # Watchdog Desktop App - Runtime Dependencies
 # Build tools (pyinstaller) are installed by build scripts, not here.
 
+
+# Watchdog Desktop App – Runtime Dependencies
 pywebview>=4.0
+requests>=2.31
+packaging>=23.0

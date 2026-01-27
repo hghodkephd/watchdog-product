@@ -23,3 +23,4 @@ keyring>=24.0.0
 keyrings.alt>=5.0.0
 
 streamlit-autorefresh==1.0.1
+sdnotify

@@ -14,6 +14,22 @@ This module wraps the validated OSS BLE scanner and adds production features:
 import sys
 import threading
 import time
+from typing import Optional
+
+try:
+    import sdnotify
+except ImportError:
+    sdnotify = None
+
+def _get_systemd_notifier() -> Optional["sdnotify.SystemdNotifier"]:
+    if sdnotify is None:
+        return None
+    try:
+        return sdnotify.SystemdNotifier()
+    except Exception:
+        return None
+
+
 import signal
 import os
 
@@ -314,6 +330,11 @@ class WatchdogMonitor:
         _log_core.info("PID: %d", os.getpid())
         _log_core.info("=" * 60)
         
+
+        # systemd watchdog notifier (optional; no-op if sdnotify not installed / not running under systemd)
+        notifier = _get_systemd_notifier()
+        last_watchdog_ping = 0.0
+        
         # Also print to stderr for immediate visibility in journalctl
         print(f"[watchdog] Starting - PID {os.getpid()}", file=sys.stderr, flush=True)
         
@@ -373,8 +394,16 @@ class WatchdogMonitor:
         try:
             _log_core.info("Entering main monitoring loop")
             print("[watchdog] Entering main loop", file=sys.stderr, flush=True)
-            
+
+            # Tell systemd we're ready (only after startup completed and we're entering steady-state loop)
+            if notifier is not None:
+                notifier.notify("READY=1")
+
             while self.running:
+                # Feed systemd watchdog periodically (must be < WatchdogSec)
+                if notifier is not None and (time.time() - last_watchdog_ping) >= 30:
+                    notifier.notify("WATCHDOG=1")
+                    last_watchdog_ping = time.time()
                 # Start OSS scanner with database callback
                 _log_ble.info("Starting BLE scanner (attempt #%d)...", restart_count)
                 
@@ -413,6 +442,10 @@ class WatchdogMonitor:
                 # Monitor for restart requests - THIS IS THE MAIN BLOCKING LOOP
                 _log_core.debug("Scanner started, entering monitoring loop")
                 while self.running and not self.restart_requested:
+                    # Feed systemd watchdog while we're in the inner loop too
+                    if notifier is not None and (time.time() - last_watchdog_ping) >= 30:
+                        notifier.notify("WATCHDOG=1")
+                        last_watchdog_ping = time.time()
                     time.sleep(1)
                 
                 # Log why we exited the inner loop
