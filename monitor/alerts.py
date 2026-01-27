@@ -99,7 +99,7 @@ def check_alerts(df_latest: pd.DataFrame, cfg: AppConfig) -> List[Alert]:
         offline_threshold_sec = cfg.alerts.sensor_offline_minutes * 60
         
         if reading_age_sec > offline_threshold_sec:
-            minutes_ago = int(reading_age_sec / 60)
+            minutes_ago = float(reading_age_sec / 60)
             alerts.append(Alert(
                 sensor_id=sensor_id,
                 sensor_name=sensor_name,
