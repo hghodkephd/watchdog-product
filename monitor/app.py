@@ -1365,4 +1365,5 @@ with col_footer:
     st.caption("Watchdog Environmental Monitor v1.0.0 | © 2026")
 with col_refresh:
     if st.button("🔄 Refresh Page", use_container_width=True, key="footer_refresh"):
+        get_system_health.clear()
         st.rerun()

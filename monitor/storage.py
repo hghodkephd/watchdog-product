@@ -489,7 +489,7 @@ class DatabaseWriter:
             # Disk-space protection: pause writes and drop readings when storage is low
             self._maybe_pause_or_resume_writes()
             if self._writes_paused_low_disk:
-                self.dropped_readings += len(batch)
+                self._increment_dropped(len(batch))
                 now = time.time()
                 # Log at most once per minute while paused
                 if (now - self._last_low_disk_log_ts) >= 60.0:

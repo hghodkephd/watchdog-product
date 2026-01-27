@@ -12,19 +12,11 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from enum import Enum
 from typing import Dict, List, Optional
-
+from alert_engine import Severity  # canonical definition
 from logging_config import get_logger
 
 _log = get_logger("watchdog.alarms")
-
-
-class Severity(Enum):
-    """Alarm severity levels."""
-    NONE = 0
-    WARNING = 1    # Near threshold
-    CRITICAL = 2   # Threshold exceeded
 
 
 @dataclass

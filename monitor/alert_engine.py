@@ -419,6 +419,7 @@ class EmailCircuitBreaker:
     
     After EMAIL_MAX_CONSECUTIVE_FAILURES, email is disabled until user re-tests.
     """
+    AUTO_RESET_HOURS = 24
     
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -451,6 +452,15 @@ class EmailCircuitBreaker:
         """Check if email sending is currently allowed. Returns (allowed, reason)."""
         state = self.get_state()
         
+
+        # Auto-reset after cooldown period
+        disabled_ts = state.get("disabled_at_ts")
+        if disabled_ts is not None:
+            elapsed = time.time() - disabled_ts
+            if elapsed >= self.AUTO_RESET_HOURS * 3600:
+                self.reset_for_retest()
+                return True, "Email circuit breaker auto-reset after cooldown"
+
         # Check if disabled
         if state.get("disabled_at_ts"):
             return False, "Email disabled due to repeated failures. Re-test email in Settings to re-enable."
