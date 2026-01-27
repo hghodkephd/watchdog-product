@@ -713,7 +713,9 @@ with tab1:
                     
                     if not df_history.empty:
                         # Convert timestamp to datetime
-                        df_history['datetime'] = pd.to_datetime(df_history['ts'], unit='s', utc=True).dt.tz_convert(user_tz)
+                        # Note: get_downsampled_timeseries returns 'timestamp' column, not 'ts'
+                        ts_col = 'timestamp' if 'timestamp' in df_history.columns else 'ts'
+                        df_history['datetime'] = pd.to_datetime(df_history[ts_col], unit='s', utc=True).dt.tz_convert(user_tz)
                         
                         # Convert temp to user's units
                         if cfg.units.upper() == "F":
