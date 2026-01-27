@@ -4,6 +4,9 @@ Watchdog Environmental Monitor - Production Dashboard
 Same monitoring experience as OSS, with database persistence and production features
 """
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1
+
 import pandas as pd
 import altair as alt
 import time
@@ -25,8 +28,6 @@ from alarm_state import get_alarm_manager, process_alerts, Severity, SILENCE_OPT
 from alarm_ui import render_alarm_banners, process_alerts_and_notify, render_email_settings
 from config import EmailConfig
 from notifications import send_test_email, send_alarm_email, send_cleared_email
-
-import streamlit.components.v1
 
 
 
@@ -1149,6 +1150,8 @@ with tab2:
 
         # Use a wider window for setup so sensors have time to appear on first run
         cutoff = time.time() - 900  # last 15 minutes
+        start_ts = cutoff
+        end_ts = time.time()
 
         detected_query = """
         SELECT

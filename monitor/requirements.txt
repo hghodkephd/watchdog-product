@@ -21,3 +21,5 @@ platformdirs>=4.0.0
 # Secure credential storage
 keyring>=24.0.0
 keyrings.alt>=5.0.0
+
+streamlit-autorefresh==1.0.1
