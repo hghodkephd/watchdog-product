@@ -28,6 +28,44 @@ from notifications import send_test_email, send_alarm_email, send_cleared_email
 
 import streamlit.components.v1
 
+
+
+# -----------------------------------------------------------------------------
+# P0 performance: cached trends queries
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=5, show_spinner=False)
+def _cached_trends_fast(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_points_per_sensor, db_path_str):
+    """Short TTL cache for live hour view."""
+    conn = get_connection(db_path_str)
+    try:
+        return get_downsampled_timeseries(
+            conn,
+            list(sensor_ids_tuple),
+            start_ts,
+            end_ts,
+            bucket_seconds=bucket_seconds,
+            max_points_per_sensor=max_points_per_sensor,
+        )
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_trends_slow(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_points_per_sensor, db_path_str):
+    """Longer TTL cache for day/week/month (and fixed windows)."""
+    conn = get_connection(db_path_str)
+    try:
+        return get_downsampled_timeseries(
+            conn,
+            list(sensor_ids_tuple),
+            start_ts,
+            end_ts,
+            bucket_seconds=bucket_seconds,
+            max_points_per_sensor=max_points_per_sensor,
+        )
+    finally:
+        conn.close()
+ 
 # Page config
 st.set_page_config(
     page_title="Watchdog Environmental Monitor",
@@ -755,6 +793,7 @@ with tab1:
             user_tz = get_user_timezone()
             now_dt = datetime.now(tz=user_tz)
             end_dt = now_dt
+            is_hour_live = False
 
             if time_window == "Hour":
                 # High-resolution view. Default is rolling "last hour". Optionally allow
@@ -765,6 +804,7 @@ with tab1:
                     horizontal=True,
                     key="hour_view_mode",
                 )
+                is_hour_live = (hour_mode == "Last hour (live)")
 
                 if hour_mode == "Choose a specific hour":
                     default_date = now_dt.date()
@@ -817,6 +857,18 @@ with tab1:
             start_ts = start_dt.timestamp()
             end_ts = end_dt.timestamp()
 
+            # P0: auto-refresh only for the live rolling hour view.
+            # Avoid refreshing for fixed-hour investigations (keeps the UI calm and fast).
+            if time_window == "Hour" and is_hour_live:
+                refresh_html = """
+                <script>
+                    setTimeout(function() {
+                        window.parent.location.reload();
+                    }, 5000);
+                </script>
+                """
+                streamlit.components.v1.html(refresh_html, height=0)
+
             
             st.subheader(f"Trends (Last {time_window})")
             
@@ -838,14 +890,37 @@ with tab1:
                     points_per_sensor = max(300, MAX_POINTS_TOTAL // max(1, len(chart_sensor_ids)))
                     range_seconds = max(1.0, float(end_ts - start_ts))
                     bucket_seconds = max(1, int(math.ceil(range_seconds / points_per_sensor)))
-                    df = get_downsampled_timeseries(
-                        conn,
-                        chart_sensor_ids,
-                        start_ts,
-                        end_ts,
-                        bucket_seconds=bucket_seconds,
-                        max_points_per_sensor=points_per_sensor,
-                    )
+                    
+                    # Cache trend data to reduce rerun cost.
+                    db_path_str = str(get_db_path())
+                    if time_window == "Hour" and is_hour_live:
+                        # align cache keys with 5s refresh cadence
+                        step = 5
+                        end_ts_cache = end_ts - (end_ts % step)
+                        start_ts_cache = start_ts  # rolling hour window
+                        df = _cached_trends_fast(
+                            tuple(chart_sensor_ids),
+                            start_ts_cache,
+                            end_ts_cache,
+                            bucket_seconds,
+                            points_per_sensor,
+                            db_path_str,
+                        )
+                    else:
+                        # align cache keys with 60s bucket to prevent cache churn
+                        step = 60
+                        end_ts_cache = end_ts - (end_ts % step)
+                        start_ts_cache = start_ts - (start_ts % step)
+                        df = _cached_trends_slow(
+                            tuple(chart_sensor_ids),
+                            start_ts_cache,
+                            end_ts_cache,
+                            bucket_seconds,
+                            points_per_sensor,
+                            db_path_str,
+                        )
+
+                    
                     # Show the downsampling rate for transparency
                     if bucket_seconds > 1:
                         st.caption(f"Downsampled: ~1 point per {bucket_seconds}s per sensor (bounded for performance).")
