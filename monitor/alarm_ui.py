@@ -496,3 +496,16 @@ def render_notification_log(limit: int = 20):
     
     except Exception as e:
         st.error(f"Could not load notification log: {e}")
+
+# ---------------------------------------------------------------------
+# Backward compatibility shim
+# ---------------------------------------------------------------------
+def process_alerts_and_notify(alerts, cfg, email_config):
+    """
+    DEPRECATED.
+
+    Alerts are processed by the background alert engine.
+    This stub is kept for backward compatibility because
+    monitor/app.py still imports this symbol.
+    """
+    return None
