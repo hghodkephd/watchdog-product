@@ -313,19 +313,40 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
         )
         
         # Password handling with keyring
-        current_password_display = "••••••••" if email_config.get_actual_password() else ""
-        new_password = st.text_input(
-            "App Password",
-            value="",
-            type="password",
-            placeholder=current_password_display or "Enter Gmail app password",
-            help="For Gmail, use an App Password (not your regular password). Leave blank to keep existing.",
-            key="email_password"
-        )
+        # Check if we already have a password stored
+        existing_password = email_config.get_actual_password()
+        has_existing_password = bool(existing_password)
         
-        # Only update password if user entered something new
-        if new_password:
-            email_config.set_password(new_password)
+        if has_existing_password:
+            # Show masked display and option to change
+            st.text_input(
+                "App Password",
+                value="••••••••••••••••",
+                disabled=True,
+                key="email_password_display",
+                help="Password is securely stored in system keyring."
+            )
+            new_password = st.text_input(
+                "New Password (leave blank to keep current)",
+                value="",
+                type="password",
+                key="email_password_new",
+                placeholder="Enter new app password to change"
+            )
+        else:
+            # No password yet - show entry field
+            new_password = st.text_input(
+                "App Password",
+                value="",
+                type="password",
+                key="email_password",
+                placeholder="Enter Gmail app password",
+                help="For Gmail, use an App Password (not your regular password)."
+            )
+    
+    # Only update password if user entered something new
+    if new_password:
+        email_config.set_password(new_password)
     
     notify_on_clear = st.checkbox(
         "Send email when alarm clears",
@@ -336,13 +357,14 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
     # Test email button
     st.markdown("---")
     
-    # For test_config, we need to handle the password correctly:
-    # - If user entered a new password, use that for testing
-    # - Otherwise, use the existing marker so get_actual_password() retrieves from keyring
+    # Determine the password to use for testing
     if new_password:
         test_password = new_password
     else:
-        test_password = email_config.sender_password  # Will be "__KEYRING__" if migrated
+        test_password = email_config.sender_password  # "__KEYRING__" marker or legacy password
+    
+    # Determine if we have a usable password for validation
+    has_usable_password = bool(new_password) or has_existing_password
     
     test_config = EmailConfig(
         enabled=True,
@@ -355,12 +377,12 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
         notify_on_clear=notify_on_clear,
     )
     
-    # Determine if we have a usable password (new entry or existing in keyring)
-    has_password = bool(new_password) or bool(email_config.get_actual_password())
+    # Button label changes if circuit breaker is open
+    button_label = "📤 Test & Re-enable" if cb_status.get("is_disabled") else "📤 Send Test Email"
     
     col1, col2 = st.columns([1, 3])
     with col1:
-        if st.button("📤 Send Test Email", disabled=not test_config.is_configured()):
+        if st.button(button_label, disabled=not test_config.is_configured()):
             # Reset circuit breaker before test
             reset_email_circuit_breaker()
             
@@ -378,9 +400,10 @@ def render_email_settings(email_config: Optional[EmailConfig]) -> Optional[Email
                 missing.append("recipient")
             if not sender_email:
                 missing.append("sender email")
-            if not has_password:
+            if not has_usable_password:
                 missing.append("password")
-            st.caption(f"Missing: {', '.join(missing)}")
+            if missing:
+                st.caption(f"Missing: {', '.join(missing)}")
     
     # Gmail setup help
     with st.expander("Gmail Setup Help"):

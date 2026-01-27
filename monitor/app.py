@@ -432,699 +432,322 @@ with tab1:
     # === CRITICAL: Email system warning (must be first!) ===
     from alarm_ui import render_email_system_warning
     render_email_system_warning()
+    
     # Check monitoring status
     status = get_monitoring_status()
     
     # === First-run onboarding ===
-    if is_first_run(cfg):
-        if render_onboarding(cfg, status):
-            # Onboarding was rendered; do not render the normal Monitoring UI on this run.
-            st.stop()   
+    is_onboarding = is_first_run(cfg)
     
-    # --------------------
-    # System Health panel
-    # --------------------
-    health = get_system_health(window_s=300)
-
-    # Compute simple status lights
-    is_running = bool(status.get("is_running", False))
-    age = health.get("last_reading_age_s", None)
-    sensors_5m = int(health.get("distinct_sensors_window", 0) or 0)
-
-    # Freshness thresholds (tune later)
-    if (age is None) or (not health.get("db_ok", False)):
-        freshness_light = "🔴"
-        freshness_text = "No readings yet"
-    elif age <= 120:
-        freshness_light = "🟢"
-        freshness_text = f"{int(age)}s ago"
-    elif age <= 600:
-        freshness_light = "🟡"
-        freshness_text = f"{int(age)}s ago"
+    if is_onboarding:
+        render_onboarding(cfg, status)
+        # Don't render rest of Monitoring tab during onboarding
+        # But DO NOT use st.stop() - that blocks tab2 and tab3!
+    
     else:
-        freshness_light = "🔴"
-        freshness_text = f"{int(age)}s ago"
+        # ===========================================
+        # NORMAL MONITORING UI (only when not onboarding)
+        # ===========================================
+        
+        # --------------------
+        # System Health panel
+        # --------------------
+        health = get_system_health(window_s=300)
 
-    run_light = "🟢" if is_running else "🔴"
-    bt = health.get("bluetooth_powered", None)
-    bt_light = "🟢" if bt is True else ("🔴" if bt is False else "🟡")
-    bt_text = "Powered" if bt is True else ("Off" if bt is False else "Unknown")
+        # Compute simple status lights
+        is_running = bool(status.get("is_running", False))
+        age = health.get("last_reading_age_s", None)
+        sensors_5m = int(health.get("distinct_sensors_window", 0) or 0)
 
-    st.markdown("### 🩺 System Health")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Monitor service", f"{run_light} {'Running' if is_running else 'Stopped'}")
-    with c2:
-        st.metric("Bluetooth", f"{bt_light} {bt_text}")
-    with c3:
-        st.metric("Sensors (last 5m)", f"{'🟢' if sensors_5m > 0 else '🔴'} {sensors_5m}")
-    with c4:
-        db_ok = bool(health.get("db_ok", False))
-        st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
+        # Freshness thresholds (tune later)
+        if (age is None) or (not health.get("db_ok", False)):
+            freshness_light = "🔴"
+            freshness_text = "No readings yet"
+        elif age <= 120:
+            freshness_light = "🟢"
+            freshness_text = f"{int(age)}s ago"
+        elif age <= 600:
+            freshness_light = "🟡"
+            freshness_text = f"{int(age)}s ago"
+        else:
+            freshness_light = "🔴"
+            freshness_text = f"{int(age)}s ago"
 
-# Check for dropped readings
-    try:
-        from storage import get_dropped_readings_count, get_connection
-        conn = get_connection()
-        dropped_count = get_dropped_readings_count(conn)
-        conn.close()
-        if dropped_count > 0:
-            st.warning(
-                f"⚠️ **{dropped_count} readings have been dropped** due to database backlog. "
-                "Consider archiving old data in Settings → Data Management."
-            )
-    except Exception:
-        pass  # Don't let this break the dashboard
+        run_light = "🟢" if is_running else "🔴"
+        bt = health.get("bluetooth_powered", None)
+        bt_light = "🟢" if bt is True else ("🔴" if bt is False else "🟡")
+        bt_text = "Powered" if bt is True else ("Off" if bt is False else "Unknown")
 
-    # Optional: compact “what to do” hints only when red
-    if not is_running:
-        st.info("Monitor is stopped. Use **Start monitoring** below.")
-    if bt is False:
-        st.warning("Bluetooth is OFF. Run: `sudo bash ~/Watchdog/deploy/watchdog-bt-unblock.sh`")
-    if db_ok is False:
-        st.warning("Database check failed. Verify `~/Watchdog/monitor/data/data.sqlite3` exists and permissions are correct.")
-    
-    # If a monitor process is already running when the UI starts, require explicit user acknowledgement.
-    # This prevents "autostart" confusion caused by stale processes from previous sessions.
-    if status.get("is_running", False) and not st.session_state.monitor_acknowledged:
-        st.warning(
-            "A Watchdog monitoring process is already running. "
-            "This may be left over from a previous session.\n\n"
-            "Choose one:"
-        )
-        cA, cB = st.columns(2)
-        with cA:
-            if st.button("✅ Use existing monitor", use_container_width=True):
-                st.session_state.monitor_acknowledged = True
-                st.session_state.monitor_owned_by_ui = True
-                st.rerun()
-        with cB:
-            if st.button("🛑 Stop existing monitor", use_container_width=True):
-                success, msg = stop_monitoring()
-                if success:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-                st.session_state.monitor_acknowledged = True
-                st.session_state.monitor_owned_by_ui = False
-                time.sleep(1)
-                st.rerun()
+        st.markdown("### 🩺 System Health")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Monitor service", f"{run_light} {'Running' if is_running else 'Stopped'}")
+        with c2:
+            st.metric("Bluetooth", f"{bt_light} {bt_text}")
+        with c3:
+            st.metric("Sensors (last 5m)", f"{'🟢' if sensors_5m > 0 else '🔴'} {sensors_5m}")
+        with c4:
+            db_ok = bool(health.get("db_ok", False))
+            st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
 
-        # Do not render normal Start/Stop UI until the user acknowledges the existing process.
-        st.stop()
-    
-    # Controls (OSS-style)
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        if not status['is_running']:
-            if st.button("▶️ Start", use_container_width=True):
-                st.session_state.monitor_acknowledged = True
-                st.session_state.monitor_owned_by_ui = True
+        # Check for dropped readings
+        try:
+            from storage import get_dropped_readings_count, get_connection
+            conn = get_connection()
+            dropped_count = get_dropped_readings_count(conn)
+            conn.close()
+            if dropped_count > 0:
+                st.warning(
+                    f"⚠️ **{dropped_count} readings have been dropped** due to database backlog. "
+                    "Consider archiving old data in Settings → Data Management."
+                )
+        except Exception:
+            pass  # Don't let this break the dashboard
+
+        # Optional: compact "what to do" hints only when red
+        if not is_running:
+            st.info("Monitor is stopped. Use **Start monitoring** below.")
+        if bt is False:
+            st.warning("Bluetooth is OFF. Run: `sudo bash ~/Watchdog/deploy/watchdog-bt-unblock.sh`")
+        if db_ok is False:
+            st.warning("Database check failed. Verify `~/Watchdog/monitor/data/data.sqlite3` exists and permissions are correct.")
+        
+        # --------------------
+        # Start/Stop controls
+        # --------------------
+        col_start, col_stop, col_spacer = st.columns([1, 1, 3])
+        with col_start:
+            if st.button("▶️ Start", disabled=is_running, use_container_width=True):
                 success, msg, pid = start_monitoring()
                 if success:
-                    st.success(msg)
-                    time.sleep(2)
-                    st.rerun()
-                else:
-                    st.error(msg)
-        else:
-            if st.button("⏹️ Stop", use_container_width=True, type="primary"):
-                success, msg = stop_monitoring()
-                st.session_state.monitor_owned_by_ui = False
-                st.session_state.monitor_acknowledged = True
-                
-                if success:
-                    st.success(msg)
+                    st.success(f"Started monitoring (PID {pid})")
                     time.sleep(1)
                     st.rerun()
                 else:
-                    st.error(msg)
-    
-    with col2:
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.rerun()
-    
-    with col3:
-        show_humidity = st.checkbox("Show Humidity", value=True, key="show_humidity_main")
-    
-    st.divider()
-    
-    configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
+                    st.error(f"Failed to start: {msg}")
+        
+        with col_stop:
+            if st.button("⏹️ Stop", disabled=not is_running, use_container_width=True):
+                success, msg = stop_monitoring()
+                if success:
+                    st.success("Stopped monitoring")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"Failed to stop: {msg}")
 
-    
-    # Get latest readings from database
-    conn = None
-    try:
-        conn = get_connection()
-        
-        # Initialize database if needed (creates tables)
-        init_db(conn)
-        
-        # Query latest reading per sensor
-        query = """
-        SELECT
-            r.sensor_id,
-            r.name,
-            r.ts AS timestamp,
-            r.temp_c,
-            r.humidity,
-            r.battery,
-            r.rssi
-        FROM readings r
-        JOIN (
-            SELECT sensor_id, MAX(ts) AS max_ts
-            FROM readings
-            WHERE ts >= ?
-            GROUP BY sensor_id
-        ) m
-        ON r.sensor_id = m.sensor_id AND r.ts = m.max_ts
-        ORDER BY r.name
-        """
-        
-        # Get readings from last 5 minutes
-        cutoff = time.time() - 300
-        df_latest = pd.read_sql_query(query, conn, params=(cutoff,))
-    except Exception as e:
-        st.error(f"Database error: {e}")
-        df_latest = pd.DataFrame()
+        st.divider()
+
+        # --------------------
+        # Current Readings
+        # --------------------
         conn = None
+        df_latest = pd.DataFrame()
         
-    
-    
-    # -----------------------------------------------------------------
-    # Configured sensor status table (shows sensors even if stale/offline)
-    # -----------------------------------------------------------------
-    if configured_ids:
-        df_cfg_latest = pd.DataFrame()
         try:
-            if conn is None:
-                conn = get_connection()
-                init_db(conn)
-
-            placeholders = ",".join(["?"] * len(configured_ids))
-            query_cfg = f"""
-            SELECT
-                r.sensor_id,
-                r.ts AS timestamp,
-                r.temp_c,
-                r.humidity,
-                r.battery,
-                r.rssi
-            FROM readings r
-            JOIN (
-                SELECT sensor_id, MAX(ts) AS max_ts
-                FROM readings
-                WHERE sensor_id IN ({placeholders})
-                GROUP BY sensor_id
-            ) m
-            ON r.sensor_id = m.sensor_id AND r.ts = m.max_ts
-            """
-            df_cfg_latest = pd.read_sql_query(query_cfg, conn, params=tuple(configured_ids))
+            conn = get_connection()
+            init_db(conn)
+            
+            # Get latest readings from last 5 minutes
+            cutoff = time.time() - 300
+            df_latest = pd.read_sql_query(
+                """
+                SELECT r.sensor_id, r.name, r.ts, r.temp_c, r.humidity, r.battery, r.rssi
+                FROM readings r
+                INNER JOIN (
+                    SELECT sensor_id, MAX(ts) as max_ts
+                    FROM readings
+                    WHERE ts >= ?
+                    GROUP BY sensor_id
+                ) latest ON r.sensor_id = latest.sensor_id AND r.ts = latest.max_ts
+                ORDER BY r.name
+                """,
+                conn,
+                params=(cutoff,)
+            )
         except Exception as e:
-            st.error(f"Database error (configured sensors): {e}")
-            df_cfg_latest = pd.DataFrame()
+            st.error(f"Database error: {e}")
 
-        now_ts = time.time()
-        rows = []
-        for sensor_id in sorted(configured_ids):
-            sc = cfg.sensors.get(sensor_id)
-            display_name = getattr(sc, "name", sensor_id)
+        # Get configured sensor IDs
+        configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
 
-            rec = None
-            if not df_cfg_latest.empty:
-                match = df_cfg_latest[df_cfg_latest["sensor_id"] == sensor_id]
-                if not match.empty:
-                    rec = match.iloc[0].to_dict()
-
-            last_ts = rec.get("timestamp") if rec else None
-            if last_ts is None or pd.isna(last_ts):
-                status_label = "NEVER"
-                age_min = None
-                last_seen_str = "Never"
+        # Handle case where monitoring isn't running or no data yet
+        if df_latest.empty:
+            if not is_running:
+                st.session_state.pop("scan_autorefresh_started_at", None)
+                st.info("👆 Click **Start** to begin monitoring")
             else:
-                age_s = max(0.0, now_ts - float(last_ts))
-                age_min = age_s / 60.0
-
-                # Status thresholds (home monitoring defaults)
-                if age_s <= 300:
-                    status_label = "OK"
-                elif age_s <= 1800:
-                    status_label = "STALE"
-                else:
-                    status_label = "OFFLINE"
-
-                last_seen_str = datetime.fromtimestamp(float(last_ts)).strftime("%Y-%m-%d %H:%M:%S")
-
-            # Convert to user's units if we have a temperature
-            temp_display = ""
-            if rec and rec.get("temp_c") is not None and not pd.isna(rec.get("temp_c")):
-                temp_c = float(rec["temp_c"])
-                if cfg.units.upper() == "F":
-                    temp_display = f"{(temp_c * 9/5 + 32):.1f}°F"
-                else:
-                    temp_display = f"{temp_c:.1f}°C"
-
-            hum_display = ""
-            if rec and rec.get("humidity") is not None and not pd.isna(rec.get("humidity")):
-                hum_display = f"{float(rec['humidity']):.1f}%"
-
-            batt_display = ""
-            if rec and rec.get("battery") is not None and not pd.isna(rec.get("battery")):
-                batt_display = f"{float(rec['battery']):.0f}%"
-
-            rows.append({
-                "Name": display_name,
-                "Sensor ID": sensor_id,
-                "Status": status_label,
-                "Last seen": last_seen_str,
-                "Age (min)": "" if age_min is None else round(age_min, 1),
-                "Temp": temp_display,
-                "Humidity": hum_display,
-                "Battery": batt_display,
-            })
-
-        st.subheader("Configured Sensors")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.divider()
-    
-    if not df_latest.empty:
-        # -----------------------------------------------------------------
-        # View selection:
-        #   - df_latest: all detected sensors with a reading in the last 5 minutes
-        #   - df_display: what Monitoring should show (configured-only once config exists)
-        # -----------------------------------------------------------------
-
-        detected_ids = set(df_latest["sensor_id"].unique())
-        unconfigured_detected = sorted(list(detected_ids - configured_ids))
-
-        if configured_ids:
-            df_display = df_latest[df_latest["sensor_id"].isin(configured_ids)].copy()
-        else:
-            df_display = df_latest.copy()
-
-        # If sensors are configured but none have reported recently, say so explicitly.
-        if configured_ids and df_display.empty:
-            st.warning("No configured sensors have reported in the last 5 minutes.")
-            if unconfigured_detected:
-                st.info(
-                    "Watchdog has detected unconfigured sensor(s): "
-                    + ", ".join(unconfigured_detected)
-                    + ". Go to **Setup** to add/configure them."
-                )
-        else:
-            # Surface any newly detected (but unconfigured) sensors as a nudge to visit Setup.
-            if unconfigured_detected:
-                st.info(
-                    "🆕 New sensor(s) detected but not configured yet: "
-                    + ", ".join(unconfigured_detected)
-                    + ". Go to **Setup** to select and configure."
-                )
-
-            # Check for alerts (configured sensors only, if any are configured)
-            alerts = check_alerts(df_display, cfg)
-            # Process through alarm state manager + send notifications
-            email_config = getattr(cfg, 'email', None)
-            process_alerts_and_notify(alerts, cfg, email_config)
-
-            # Display current readings
-            st.subheader("Current Readings")
-
-            num_sensors = len(df_display)
-            cols = st.columns(min(3, num_sensors))
-
-            for idx, row in df_display.reset_index(drop=True).iterrows():
-                col = cols[idx % 3]
+                # Auto-refresh while scanning
+                if "scan_autorefresh_started_at" not in st.session_state:
+                    st.session_state.scan_autorefresh_started_at = time.time()
                 
-                with col:
-                    # Convert to user's units
-                    if cfg.units.upper() == "F":
-                        temp = row['temp_c'] * 9/5 + 32
-                        unit = "°F"
-                    else:
-                        temp = row['temp_c']
-                        unit = "°C"
-                    
-                    st.markdown(f"**{row['name']}**")
-                    st.metric("Temperature", f"{temp:.1f}{unit}")
-                    st.metric("Humidity", f"{row['humidity']:.1f}%")
-                    
-        
-        st.divider()
-        
-        # Historical charts with Altair
-        if len(df_display) > 0:
-            # Time window selector and weather toggle
-            col_window, col_weather, col_spacer = st.columns([2, 2, 2])
-            with col_window:
-                time_window = st.selectbox(
-                    "Time Range",
-                    ["Hour", "Day", "Week", "Month"],
-                    index=0,
-                    key="time_window"
-                )
-            with col_weather:
-                show_weather = st.checkbox(
-                    "Show Outdoor Temp", 
-                    value=cfg.weather is not None,
-                    disabled=cfg.weather is None,
-                    help="Overlay outdoor temperature from weather API" if cfg.weather else "Set location in Settings to enable"
-                )
-            
-            # Calculate time range                
-            user_tz = get_user_timezone()
-            now_dt = datetime.now(tz=user_tz)
-            end_dt = now_dt
-            is_hour_live = False
-
-            if time_window == "Hour":
-                # High-resolution view. Default is rolling "last hour". Optionally allow
-                # user to choose a specific hour (fixed window) for incident inspection.
-                hour_mode = st.radio(
-                    "Hour View",
-                    ["Last hour (live)", "Choose a specific hour"],
-                    horizontal=True,
-                    key="hour_view_mode",
-                )
-                is_hour_live = (hour_mode == "Last hour (live)")
-
-                if hour_mode == "Choose a specific hour":
-                    default_date = now_dt.date()
-                    default_hour = int(now_dt.hour)
-
-                    col_h1, col_h2 = st.columns([2, 1])
-                    with col_h1:
-                        chosen_date = st.date_input(
-                            "Date",
-                            value=default_date,
-                            key="hour_view_date",
-                        )
-                    with col_h2:
-                        chosen_hour = st.selectbox(
-                            "Hour",
-                            options=list(range(24)),
-                            index=default_hour,
-                            format_func=lambda h: f"{h:02d}:00",
-                            key="hour_view_hour",
-                        )
-
-                    start_dt = datetime(
-                        chosen_date.year,
-                        chosen_date.month,
-                        chosen_date.day,
-                        int(chosen_hour),
-                        0,
-                        0,
-                        tzinfo=user_tz,
-                    )
-                    end_dt = start_dt + timedelta(hours=1)
-
-                    st.caption(
-                        f"Showing {start_dt.strftime('%a %b %d, %Y %H:00')}–"
-                        f"{end_dt.strftime('%H:00')} ({user_tz.key})."
-                    )
-                else:
-                    start_dt = end_dt - timedelta(hours=1)
-                time_format = "%H:%M"    
-            elif time_window == "Day":
-                start_dt = end_dt - timedelta(days=1)
-                time_format = "%H:%M"
-            elif time_window == "Week":
-                start_dt = end_dt - timedelta(weeks=1)
-                time_format = "%a %H:%M"
-            else:  # Month
-                start_dt = end_dt - timedelta(days=30)
-                time_format = "%m/%d"
-            
-            start_ts = start_dt.timestamp()
-            end_ts = end_dt.timestamp()
-
-            # P0: auto-refresh only for the live rolling hour view.
-            # Avoid refreshing for fixed-hour investigations (keeps the UI calm and fast).
-            if time_window == "Hour" and is_hour_live:
-                refresh_html = """
-                <script>
-                    setTimeout(function() {
-                        window.parent.location.reload();
-                    }, 5000);
-                </script>
-                """
-                streamlit.components.v1.html(refresh_html, height=0)
-
-            
-            st.subheader(f"Trends (Last {time_window})")
-            
-            try:
-                # Determine which sensors to include in trends
-                if configured_ids:
-                    chart_sensor_ids = list(configured_ids)
-                else:
-                    # Fall back to whatever we have readings for "now"
-                    if "df_latest" in locals() and df_latest is not None and not df_latest.empty:
-                        chart_sensor_ids = list(df_latest["sensor_id"].dropna().unique())
-                    else:
-                        chart_sensor_ids = []
-
-                # Hard budget of points across all sensors for this chart.
-                # We allocate per-sensor points so total stays bounded on Pi Zero 2 W.
-                MAX_POINTS_TOTAL = 3600
-                if chart_sensor_ids:
-                    points_per_sensor = max(300, MAX_POINTS_TOTAL // max(1, len(chart_sensor_ids)))
-                    range_seconds = max(1.0, float(end_ts - start_ts))
-                    bucket_seconds = max(1, int(math.ceil(range_seconds / points_per_sensor)))
-                    
-                    # Cache trend data to reduce rerun cost.
-                    db_path_str = str(get_db_path())
-                    if time_window == "Hour" and is_hour_live:
-                        # align cache keys with 5s refresh cadence
-                        step = 5
-                        end_ts_cache = end_ts - (end_ts % step)
-                        start_ts_cache = start_ts  # rolling hour window
-                        df = _cached_trends_fast(
-                            tuple(chart_sensor_ids),
-                            start_ts_cache,
-                            end_ts_cache,
-                            bucket_seconds,
-                            points_per_sensor,
-                            db_path_str,
-                        )
-                    else:
-                        # align cache keys with 60s bucket to prevent cache churn
-                        step = 60
-                        end_ts_cache = end_ts - (end_ts % step)
-                        start_ts_cache = start_ts - (start_ts % step)
-                        df = _cached_trends_slow(
-                            tuple(chart_sensor_ids),
-                            start_ts_cache,
-                            end_ts_cache,
-                            bucket_seconds,
-                            points_per_sensor,
-                            db_path_str,
-                        )
-
-                    
-                    # Show the downsampling rate for transparency
-                    if bucket_seconds > 1:
-                        st.caption(f"Downsampled: ~1 point per {bucket_seconds}s per sensor (bounded for performance).")
-                else:
-                    df = pd.DataFrame(columns=["sensor_id", "name", "timestamp", "temp_c", "humidity"])
-                     
-                    
-                if not df.empty and len(df) > 5:
-                    # Convert timestamps to user's local timezone
-                    user_tz = get_user_timezone()
-                    df['time'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert(user_tz)
-                    
-                    # Map sensor IDs to friendly names
-                    if cfg.sensors:
-                        label_map = {sid: scfg.name for sid, scfg in cfg.sensors.items()}
-                    else:
-                        label_map = df_latest.set_index("sensor_id")["name"].to_dict()
-
-                    df["sensor_label"] = df["sensor_id"].map(label_map).fillna(df["sensor_id"])
-                    
-                    # Convert temperature
-                    if cfg.units.upper() == "F":
-                        df['temp'] = df['temp_c'] * 9/5 + 32
-                        temp_label = "Temperature (°F)"
-                    else:
-                        df['temp'] = df['temp_c']
-                        temp_label = "Temperature (°C)"
-                    
-                    # Fetch weather data if enabled
-                    wx_df = None
-                    if show_weather and cfg.weather is not None:
-                        try:
-                            wx_df = cached_weather_series(
-                                cfg.weather.latitude,
-                                cfg.weather.longitude,
-                                start_iso=start_dt.isoformat(),
-                                end_iso=now_dt.isoformat(),
-                            )
-                            if wx_df is not None and not wx_df.empty:
-                                # ---- Normalize weather timestamps ----
-                                wx_df["time"] = pd.to_datetime(wx_df["timestamp"], errors="coerce")
-                                wx_df = wx_df.dropna(subset=["time"])
-                    
-                                # Open-Meteo returns local times when timezone="auto" (no offset).
-                                # Treat them as the LOCATION timezone, then convert to the USER timezone.
-                                loc_tz = None
-                                if cfg.weather is not None and getattr(cfg.weather, "timezone", None):
-                                    loc_tz = cfg.weather.timezone
-                    
-                                if wx_df["time"].dt.tz is None:
-                                    # localize naive timestamps to location tz (fallback to user_tz)
-                                    wx_df["time"] = wx_df["time"].dt.tz_localize(loc_tz or user_tz)
-                                # convert to user tz for overlay alignment with sensor data
-                                wx_df["time"] = wx_df["time"].dt.tz_convert(user_tz)
-                    
-                                # ---- Convert temperature units for plotting ----
-                                if cfg.units.upper() == "F":
-                                    wx_df["wx_temp"] = wx_df["wx_temp_c"] * 9/5 + 32
-                                else:
-                                    wx_df["wx_temp"] = wx_df["wx_temp_c"]
-                        except Exception:
-                            wx_df = None
-                    
-                    # Temperature chart with Altair
-                    temp_chart = alt.Chart(df).mark_line(strokeWidth=2).encode(
-                        x=alt.X('time:T', 
-                                title='Time',
-                                axis=alt.Axis(format=time_format, labelAngle=-45)),
-                        y=alt.Y('temp:Q', 
-                                title=temp_label,
-                                scale=alt.Scale(zero=False)),
-                        color=alt.Color('sensor_label:N', 
-                                       title='Sensor',
-                                       legend=alt.Legend(orient='bottom')),
-                        tooltip=[
-                            alt.Tooltip('sensor_label:N', title='Sensor'),
-                            alt.Tooltip('time:T', title='Time', format='%Y-%m-%d %H:%M:%S'),
-                            alt.Tooltip('temp:Q', title=temp_label, format='.1f'),
-                            alt.Tooltip('humidity:Q', title='Humidity (%)', format='.1f')
-                        ]
-                    ).properties(
-                        height=300
-                    )
-                    
-                    # Add weather overlay if available
-                    if wx_df is not None and not wx_df.empty:
-                        weather_line = alt.Chart(wx_df).mark_line(
-                            strokeDash=[4, 4],
-                            strokeWidth=2
-                        ).encode(
-                            x='time:T',
-                            y='wx_temp:Q',
-                            color=alt.value('#AAAAAA'),  # Light gray for visibility
-                            tooltip=[
-                                alt.Tooltip('time:T', title='Time', format='%Y-%m-%d %H:%M'),
-                                alt.Tooltip('wx_temp:Q', title=f'Outdoor {temp_label}', format='.1f'),
-                                alt.Tooltip('wx_humidity:Q', title='Outdoor Humidity (%)', format='.0f'),
-                                alt.Tooltip('wx_wind_mph:Q', title='Wind (mph)', format='.1f')
-                            ]
-                        )
-                        temp_chart = temp_chart + weather_line
-                    
-                    # Make interactive
-                    temp_chart = temp_chart.interactive()
-                    
-                    st.altair_chart(temp_chart, use_container_width=True)
-                    
-                    # Caption with legend explanation
-                    if wx_df is not None and not wx_df.empty:
-                        st.caption("Solid lines = indoor sensors | Dashed gray line = outdoor temperature")
-                    
-                    # Humidity chart
-                    if show_humidity:
-                        humidity_chart = alt.Chart(df).mark_line(strokeWidth=2).encode(
-                            x=alt.X('time:T', 
-                                    title='Time',
-                                    axis=alt.Axis(format=time_format, labelAngle=-45)),
-                            y=alt.Y('humidity:Q', 
-                                    title='Humidity (%)',
-                                    scale=alt.Scale(zero=False)),
-                            color=alt.Color('sensor_label:N', 
-                                           title='Sensor',
-                                           legend=alt.Legend(orient='bottom')),
-                            tooltip=[
-                                alt.Tooltip('sensor_label:N', title='Sensor'),
-                                alt.Tooltip('time:T', title='Time', format='%Y-%m-%d %H:%M:%S'),
-                                alt.Tooltip('humidity:Q', title='Humidity (%)', format='.1f')
-                            ]
-                        ).properties(
-                            height=250
-                        ).interactive()
-                        
-                        # Add weather humidity overlay if available
-                        if wx_df is not None and not wx_df.empty:
-                            weather_humidity_line = alt.Chart(wx_df).mark_line(
-                                strokeDash=[4, 4],
-                                strokeWidth=2
-                            ).encode(
-                                x='time:T',
-                                y='wx_humidity:Q',
-                                color=alt.value('#AAAAAA'),
-                                tooltip=[
-                                    alt.Tooltip('time:T', title='Time', format='%Y-%m-%d %H:%M'),
-                                    alt.Tooltip('wx_humidity:Q', title='Outdoor Humidity (%)', format='.0f')
-                                ]
-                            )
-                            humidity_chart = humidity_chart + weather_humidity_line
-                        
-                        st.altair_chart(humidity_chart, use_container_width=True)
-                    
-                    st.caption(f"{num_sensors} sensor(s) | {len(df)} readings in window")
-                else:
-                    st.caption(f"{num_sensors} sensor(s) | Collecting data...")
-            except Exception as e:
-                st.caption(f"{num_sensors} sensor(s) | Building history...")
-    
-    else:
-        if status['is_running']:
-            st.warning("🔍 Scanning for sensors... (may take up to ~30 seconds)")
-
-            # ---------------------------------------------------------
-            # Auto-refresh while scanning: every 30s, up to 5 minutes.
-            # After that, user can manually refresh if sensors are slow.
-            # ---------------------------------------------------------
-            # Auto-refresh while scanning (non-blocking)
-            if "scan_autorefresh_started_at" not in st.session_state:
-                st.session_state.scan_autorefresh_started_at = time.time()
-            
-            elapsed = time.time() - st.session_state.scan_autorefresh_started_at
-            remaining = max(0, 300 - int(elapsed))
-            
-            # Only auto-refresh for 5 minutes
-            if elapsed < 300:
-                st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
+                elapsed = time.time() - st.session_state.scan_autorefresh_started_at
+                remaining = max(0, 300 - int(elapsed))
                 
-                # Non-blocking refresh using Streamlit's HTML component
-                refresh_html = """
-                <script>
-                    setTimeout(function() {
-                        window.parent.location.reload();
-                    }, 15000);
-                </script>
-                <noscript>
-                    <meta http-equiv="refresh" content="15">
-                </noscript>
-                """
-                st.components.v1.html(refresh_html, height=0)
-                
-                # Show manual refresh button in case user doesn't want to wait
-                if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
-                    st.rerun()
-            else:
-                st.info("Auto-refresh stopped after 5 minutes. Click below to refresh manually.")
-                if st.button("🔄 Refresh Page", key="manual_refresh_timeout"):
-                    st.rerun()
+                if elapsed < 300:
+                    st.warning("Waiting for sensor data... This can take 10-30 seconds after starting.")
+                    st.caption(f"Auto-refresh in 15s ({remaining}s until timeout)...")
+                    
+                    refresh_html = """
+                    <script>
+                        setTimeout(function() {
+                            window.parent.location.reload();
+                        }, 15000);
+                    </script>
+                    """
+                    st.components.v1.html(refresh_html, height=0)
+                    
+                    if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
+                        st.rerun()
+                else:
+                    st.info("Auto-refresh stopped after 5 minutes. Click below to refresh manually.")
+                    if st.button("🔄 Refresh Page", key="manual_refresh_timeout"):
+                        st.rerun()
         else:
-            # Reset scanning timer when monitoring isn't running
+            # We have data - render the main dashboard
             st.session_state.pop("scan_autorefresh_started_at", None)
-            st.info("👆 Click **Start** to begin monitoring")
-    
-    # Close connection if opened
-    if conn is not None:
-        conn.close()
+            
+            # Determine what to display
+            detected_ids = set(df_latest["sensor_id"].unique())
+            unconfigured_detected = sorted(list(detected_ids - configured_ids))
+
+            if configured_ids:
+                df_display = df_latest[df_latest["sensor_id"].isin(configured_ids)].copy()
+            else:
+                df_display = df_latest.copy()
+
+            # If sensors are configured but none have reported recently
+            if configured_ids and df_display.empty:
+                st.warning("No configured sensors have reported in the last 5 minutes.")
+                if unconfigured_detected:
+                    st.info(
+                        "Watchdog has detected unconfigured sensor(s): "
+                        + ", ".join(unconfigured_detected)
+                        + ". Go to **Setup** to add/configure them."
+                    )
+            else:
+                # Surface newly detected sensors
+                if unconfigured_detected:
+                    st.info(
+                        "🆕 New sensor(s) detected but not configured yet: "
+                        + ", ".join(unconfigured_detected)
+                        + ". Go to **Setup** to select and configure."
+                    )
+
+                # Check for alerts
+                alerts = check_alerts(df_display, cfg)
+                email_config = getattr(cfg, 'email', None)
+                process_alerts_and_notify(alerts, cfg, email_config)
+
+                # Render alarm banners
+                render_alarm_banners(cfg)
+
+                # Display current readings
+                st.subheader("Current Readings")
+
+                num_sensors = len(df_display)
+                if num_sensors > 0:
+                    cols = st.columns(min(3, num_sensors))
+
+                    for idx, row in df_display.reset_index(drop=True).iterrows():
+                        col = cols[idx % 3]
+                        
+                        with col:
+                            # Convert to user's units
+                            if cfg.units.upper() == "F":
+                                temp = row['temp_c'] * 9/5 + 32
+                                unit = "°F"
+                            else:
+                                temp = row['temp_c']
+                                unit = "°C"
+                            
+                            st.markdown(f"**{row['name']}**")
+                            st.metric("Temperature", f"{temp:.1f}{unit}")
+                            st.metric("Humidity", f"{row['humidity']:.1f}%")
+                
+                st.divider()
+                
+                # Historical charts section
+                if len(df_display) > 0:
+                    # Time window selector
+                    col_window, col_weather, col_spacer = st.columns([2, 2, 2])
+                    with col_window:
+                        time_window = st.selectbox(
+                            "Time Range",
+                            ["Hour", "Day", "Week", "Month"],
+                            index=0,
+                            key="time_window"
+                        )
+                    with col_weather:
+                        show_weather = st.checkbox(
+                            "Show Outdoor Temp", 
+                            value=cfg.weather is not None,
+                            disabled=cfg.weather is None,
+                            help="Overlay outdoor temperature from weather API" if cfg.weather else "Set location in Settings to enable"
+                        )
+                    
+                    # Calculate time range                
+                    user_tz = ZoneInfo(cfg.weather.timezone if cfg.weather else "America/New_York")
+                    now_dt = datetime.now(tz=user_tz)
+                    
+                    window_config = {
+                        "Hour": (timedelta(hours=1), 10, 360),      # 1h, 10s buckets, 360 points
+                        "Day": (timedelta(days=1), 300, 288),       # 24h, 5m buckets, 288 points
+                        "Week": (timedelta(weeks=1), 1800, 336),    # 7d, 30m buckets, 336 points
+                        "Month": (timedelta(days=30), 3600, 720),   # 30d, 1h buckets, 720 points
+                    }
+                    
+                    delta, bucket_sec, max_points = window_config[time_window]
+                    start_dt = now_dt - delta
+                    start_ts = start_dt.timestamp()
+                    end_ts = now_dt.timestamp()
+                    
+                    # Get historical data
+                    sensor_ids = tuple(df_display["sensor_id"].unique())
+                    db_path_str = str(get_db_path())
+                    
+                    if time_window == "Hour":
+                        df_history = _cached_trends_fast(sensor_ids, start_ts, end_ts, bucket_sec, max_points, db_path_str)
+                    else:
+                        df_history = _cached_trends_slow(sensor_ids, start_ts, end_ts, bucket_sec, max_points, db_path_str)
+                    
+                    if not df_history.empty:
+                        # Convert timestamp to datetime
+                        df_history['datetime'] = pd.to_datetime(df_history['ts'], unit='s', utc=True).dt.tz_convert(user_tz)
+                        
+                        # Convert temp to user's units
+                        if cfg.units.upper() == "F":
+                            df_history['temp'] = df_history['temp_c'] * 9/5 + 32
+                            temp_label = "Temperature (°F)"
+                        else:
+                            df_history['temp'] = df_history['temp_c']
+                            temp_label = "Temperature (°C)"
+                        
+                        # Temperature chart
+                        st.subheader("Temperature History")
+                        temp_chart = alt.Chart(df_history).mark_line().encode(
+                            x=alt.X('datetime:T', title='Time'),
+                            y=alt.Y('temp:Q', title=temp_label),
+                            color=alt.Color('name:N', title='Sensor'),
+                            tooltip=['name', 'datetime:T', 'temp:Q']
+                        ).properties(height=300)
+                        st.altair_chart(temp_chart, use_container_width=True)
+                        
+                        # Humidity chart
+                        st.subheader("Humidity History")
+                        hum_chart = alt.Chart(df_history).mark_line().encode(
+                            x=alt.X('datetime:T', title='Time'),
+                            y=alt.Y('humidity:Q', title='Humidity (%)'),
+                            color=alt.Color('name:N', title='Sensor'),
+                            tooltip=['name', 'datetime:T', 'humidity:Q']
+                        ).properties(height=300)
+                        st.altair_chart(hum_chart, use_container_width=True)
+                    else:
+                        st.info(f"No historical data available for the selected {time_window.lower()} range.")
+
+        # Close connection if opened
+        if conn is not None:
+            conn.close()
 
 # ====================
 # TAB 2: SETUP
