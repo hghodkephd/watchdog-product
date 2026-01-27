@@ -22,6 +22,10 @@ RestartSec=10s
 Environment=PYTHONUNBUFFERED=1
 
 MemoryMax=256M
+# Strongly protect the monitor daemon from OOM kills.
+# The dashboard service should be killed first if memory pressure occurs.
+OOMScoreAdjust=-500
+
 
 # Nice=-5 gives moderate priority boost for reliable sensor polling.
 # This ensures BLE scanning isn't starved by other processes on the Pi.

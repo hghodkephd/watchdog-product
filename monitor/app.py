@@ -11,10 +11,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import subprocess
 import shutil
+import math
 
 # Watchdog imports
 from config import load_config, save_config, SensorConfig, WeatherConfig, US_TIMEZONES
-from storage import get_connection, init_db, get_db_stats, archive_old_data, list_archives, get_db_path
+from storage import get_connection, init_db, get_db_stats, archive_old_data, list_archives, get_db_path, get_downsampled_timeseries
 from alerts import check_alerts, format_alert_display
 from weather_api import geocode_zip, fetch_current_weather, fetch_weather_series
 from process_manager import start_monitoring, stop_monitoring, get_monitoring_status
@@ -750,43 +751,107 @@ with tab1:
                     help="Overlay outdoor temperature from weather API" if cfg.weather else "Set location in Settings to enable"
                 )
             
-            # Calculate time range
-            now_dt = datetime.now()
+            # Calculate time range                
+            user_tz = get_user_timezone()
+            now_dt = datetime.now(tz=user_tz)
+            end_dt = now_dt
+
             if time_window == "Hour":
-                start_dt = now_dt - timedelta(hours=1)
-                time_format = "%H:%M"
+                # High-resolution view. Default is rolling "last hour". Optionally allow
+                # user to choose a specific hour (fixed window) for incident inspection.
+                hour_mode = st.radio(
+                    "Hour View",
+                    ["Last hour (live)", "Choose a specific hour"],
+                    horizontal=True,
+                    key="hour_view_mode",
+                )
+
+                if hour_mode == "Choose a specific hour":
+                    default_date = now_dt.date()
+                    default_hour = int(now_dt.hour)
+
+                    col_h1, col_h2 = st.columns([2, 1])
+                    with col_h1:
+                        chosen_date = st.date_input(
+                            "Date",
+                            value=default_date,
+                            key="hour_view_date",
+                        )
+                    with col_h2:
+                        chosen_hour = st.selectbox(
+                            "Hour",
+                            options=list(range(24)),
+                            index=default_hour,
+                            format_func=lambda h: f"{h:02d}:00",
+                            key="hour_view_hour",
+                        )
+
+                    start_dt = datetime(
+                        chosen_date.year,
+                        chosen_date.month,
+                        chosen_date.day,
+                        int(chosen_hour),
+                        0,
+                        0,
+                        tzinfo=user_tz,
+                    )
+                    end_dt = start_dt + timedelta(hours=1)
+
+                    st.caption(
+                        f"Showing {start_dt.strftime('%a %b %d, %Y %H:00')}–"
+                        f"{end_dt.strftime('%H:00')} ({user_tz.key})."
+                    )
+                else:
+                    start_dt = end_dt - timedelta(hours=1)
+                time_format = "%H:%M"    
             elif time_window == "Day":
-                start_dt = now_dt - timedelta(days=1)
+                start_dt = end_dt - timedelta(days=1)
                 time_format = "%H:%M"
             elif time_window == "Week":
-                start_dt = now_dt - timedelta(weeks=1)
+                start_dt = end_dt - timedelta(weeks=1)
                 time_format = "%a %H:%M"
             else:  # Month
-                start_dt = now_dt - timedelta(days=30)
+                start_dt = end_dt - timedelta(days=30)
                 time_format = "%m/%d"
             
             start_ts = start_dt.timestamp()
+            end_ts = end_dt.timestamp()
+
             
             st.subheader(f"Trends (Last {time_window})")
             
             try:
-                query_hist = """
-                SELECT 
-                    sensor_id,
-                    name,
-                    ts as timestamp,
-                    temp_c,
-                    humidity
-                FROM readings
-                WHERE ts >= ?
-                ORDER BY ts
-                """
-                
-                df = pd.read_sql_query(query_hist, conn, params=(start_ts,))
-                
-                # If sensors are configured, only chart those sensors
+                # Determine which sensors to include in trends
                 if configured_ids:
-                    df = df[df["sensor_id"].isin(configured_ids)].copy()
+                    chart_sensor_ids = list(configured_ids)
+                else:
+                    # Fall back to whatever we have readings for "now"
+                    if "df_latest" in locals() and df_latest is not None and not df_latest.empty:
+                        chart_sensor_ids = list(df_latest["sensor_id"].dropna().unique())
+                    else:
+                        chart_sensor_ids = []
+
+                # Hard budget of points across all sensors for this chart.
+                # We allocate per-sensor points so total stays bounded on Pi Zero 2 W.
+                MAX_POINTS_TOTAL = 3600
+                if chart_sensor_ids:
+                    points_per_sensor = max(300, MAX_POINTS_TOTAL // max(1, len(chart_sensor_ids)))
+                    range_seconds = max(1.0, float(end_ts - start_ts))
+                    bucket_seconds = max(1, int(math.ceil(range_seconds / points_per_sensor)))
+                    df = get_downsampled_timeseries(
+                        conn,
+                        chart_sensor_ids,
+                        start_ts,
+                        end_ts,
+                        bucket_seconds=bucket_seconds,
+                        max_points_per_sensor=points_per_sensor,
+                    )
+                    # Show the downsampling rate for transparency
+                    if bucket_seconds > 1:
+                        st.caption(f"Downsampled: ~1 point per {bucket_seconds}s per sensor (bounded for performance).")
+                else:
+                    df = pd.DataFrame(columns=["sensor_id", "name", "timestamp", "temp_c", "humidity"])
+                     
                     
                 if not df.empty and len(df) > 5:
                     # Convert timestamps to user's local timezone
@@ -1023,13 +1088,13 @@ with tab2:
         JOIN (
             SELECT sensor_id, MAX(ts) AS max_ts
             FROM readings
-            WHERE ts >= ?
+            WHERE ts BETWEEN ? AND ?
             GROUP BY sensor_id
         ) m
         ON r.sensor_id = m.sensor_id AND r.ts = m.max_ts
         ORDER BY r.name
         """
-        detected_df = pd.read_sql_query(detected_query, conn, params=(cutoff,))
+        detected_df = pd.read_sql_query(detected_query, conn, params=(start_ts, end_ts))
         conn.close()
     except Exception as e:
         st.error(f"Could not load recent detections: {e}")

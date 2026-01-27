@@ -7,6 +7,7 @@ Created on Sun Dec  7 17:46:20 2025
 """
 from __future__ import annotations
 
+import math
 import gzip
 import shutil
 import sqlite3
@@ -17,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import pandas as pd
 
@@ -137,6 +138,79 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+def get_downsampled_timeseries(
+    conn: sqlite3.Connection,
+    sensor_ids: Sequence[str],
+    start_ts: float,
+    end_ts: float,
+    *,
+    bucket_seconds: int,
+    max_points_per_sensor: int,
+) -> pd.DataFrame:
+    """
+    Fetch downsampled time series data for charting.
+
+    Downsamples in SQLite by binning timestamps into fixed-size buckets and
+    averaging values per bucket. This bounds memory usage on constrained
+    hardware (e.g. Pi Zero 2 W).
+
+    Returns a DataFrame with columns:
+        sensor_id, name, timestamp, temp_c, humidity
+    """
+    if not sensor_ids:
+        return pd.DataFrame(columns=["sensor_id", "name", "timestamp", "temp_c", "humidity"])
+
+    # Defensive bounds
+    bucket_seconds = max(1, int(bucket_seconds))
+    max_points_per_sensor = max(10, int(max_points_per_sensor))
+
+    # Global LIMIT safety net. The GROUP BY should naturally keep this <=
+    # sensors * (range/bucket), but LIMIT prevents pathological loads.
+    global_limit = int(len(sensor_ids) * max_points_per_sensor + 50)
+
+    placeholders = ",".join(["?"] * len(sensor_ids))
+
+    sql = f"""
+    WITH filtered AS (
+      SELECT sensor_id, name, ts, temp_c, humidity
+      FROM readings
+      WHERE sensor_id IN ({placeholders})
+        AND ts BETWEEN ? AND ?
+    ),
+    binned AS (
+      SELECT
+        sensor_id,
+        MAX(name) AS name,
+        (? + ((ts - ?) / ?) * ?) AS ts_bin,
+        AVG(temp_c)   AS temp_c,
+        AVG(humidity) AS humidity
+      FROM filtered
+      GROUP BY sensor_id, ts_bin
+    )
+    SELECT
+      sensor_id,
+      name,
+      ts_bin AS timestamp,
+      temp_c,
+      humidity
+    FROM binned
+    ORDER BY timestamp ASC
+    LIMIT ?;
+    """
+
+    params = list(sensor_ids) + [
+        float(start_ts),
+        float(end_ts),
+        float(start_ts),       # ts_bin anchor
+        float(start_ts),       # (ts - anchor)
+        int(bucket_seconds),   # divisor
+        int(bucket_seconds),   # multiplier
+        int(global_limit),
+    ]
+
+    return pd.read_sql_query(sql, conn, params=params)
+
 
 
 def increment_dropped_readings(conn: sqlite3.Connection, count: int = 1) -> None:
