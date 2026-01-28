@@ -1132,7 +1132,11 @@ with tab3:
     
     # Email notifications
     st.subheader("Email Notifications")
-    render_email_settings(cfg)
+    updated_email = render_email_settings(cfg.email)
+    if updated_email is not None:
+        cfg.email = updated_email
+        save_config(cfg)
+        invalidate_app_config_cache()
     
     st.divider()
     
