@@ -19,7 +19,11 @@ if [ "${1:-}" = "--dry-run" ]; then
 fi
 
 # Absolute path to the monitor directory (parent of this deploy/ folder)
-WATCHDOG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Absolute path to the repository root
+REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+# Absolute path to the monitor directory
+MONITOR_DIR="$REPO_DIR/monitor"
 
 # Install-time user/group (assumes you ran via sudo as the target user)
 WATCHDOG_USER="${SUDO_USER:-$(id -un)}"
@@ -40,9 +44,10 @@ if ! python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,9) els
 fi
 
 # Check venv exists (skip for dry run)
-if [ "${DRY_RUN:-0}" -ne 1 ] && [ ! -f "$WATCHDOG_DIR/venv/bin/activate" ]; then
-  echo "ERROR: Virtual environment not found at: $WATCHDOG_DIR/venv/"
-  echo "Run setup.sh first, then rerun install-services.sh."
+
+if [ "${DRY_RUN:-0}" -ne 1 ] && [ ! -f "$REPO_DIR/venv/bin/activate" ]; then
+  echo "ERROR: Virtual environment not found at: $REPO_DIR/venv/"
+  echo "Run bootstrap.sh first, then rerun install-services.sh."
   exit 1
 fi
 
@@ -50,14 +55,16 @@ fi
 
 SERVICE_DIR="/etc/systemd/system"
 
-echo "[Watchdog] Using WATCHDOG_DIR=$WATCHDOG_DIR"
+
+echo "[Watchdog] Using REPO_DIR=$REPO_DIR"
+echo "[Watchdog] Using MONITOR_DIR=$MONITOR_DIR"
 echo "[Watchdog] Using WATCHDOG_USER=$WATCHDOG_USER"
 echo "[Watchdog] Using WATCHDOG_GROUP=$WATCHDOG_GROUP"
 echo
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "[DRY RUN] Would install services into: $SERVICE_DIR"
-  echo "[DRY RUN] Would bake templates from: $WATCHDOG_DIR/deploy"
+  echo "[DRY RUN] Would bake templates from: $MONITOR_DIR/deploy"
   exit 0
 fi
 
@@ -71,33 +78,34 @@ systemctl enable bluetooth --now || true
 
 echo
 echo "[Watchdog] Ensuring bt-unblock helper script is executable..."
-chmod +x "$WATCHDOG_DIR/deploy/watchdog-bt-unblock.sh" || true
+chmod +x "$MONITOR_DIR/deploy/watchdog-bt-unblock.sh" || true
+
 
 echo
 echo "[Watchdog] Installing systemd units..."
 
 # Bake templates -> /etc/systemd/system/*.service
 # IMPORTANT: templates MUST NOT contain stray trailing underscores.
-sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
+sed -e "s|__WATCHDOG_DIR__|$REPO_DIR|g" \
     -e "s|__WATCHDOG_USER__|$WATCHDOG_USER|g" \
     -e "s|__WATCHDOG_GROUP__|$WATCHDOG_GROUP|g" \
-    "$WATCHDOG_DIR/deploy/watchdog-monitor.service" \
+    "$MONITOR_DIR/deploy/watchdog-monitor.service" \
     > "$SERVICE_DIR/watchdog-monitor.service"
 
-sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
+sed -e "s|__WATCHDOG_DIR__|$REPO_DIR|g" \
     -e "s|__WATCHDOG_USER__|$WATCHDOG_USER|g" \
     -e "s|__WATCHDOG_GROUP__|$WATCHDOG_GROUP|g" \
-    "$WATCHDOG_DIR/deploy/watchdog-dashboard.service" \
+    "$MONITOR_DIR/deploy/watchdog-dashboard.service" \
     > "$SERVICE_DIR/watchdog-dashboard.service"
 
-sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
+sed -e "s|__WATCHDOG_DIR__|$REPO_DIR|g" \
     -e "s|__WATCHDOG_USER__|$WATCHDOG_USER|g" \
     -e "s|__WATCHDOG_GROUP__|$WATCHDOG_GROUP|g" \
-    "$WATCHDOG_DIR/deploy/watchdog-health.service" \
+    "$MONITOR_DIR/deploy/watchdog-health.service" \
     > "$SERVICE_DIR/watchdog-health.service"
 
-sed -e "s|__WATCHDOG_DIR__|$WATCHDOG_DIR|g" \
-    "$WATCHDOG_DIR/deploy/watchdog-bt-unblock.service" \
+sed -e "s|__WATCHDOG_DIR__|$REPO_DIR|g" \
+    "$MONITOR_DIR/deploy/watchdog-bt-unblock.service" \
     > "$SERVICE_DIR/watchdog-bt-unblock.service"
 
 chmod 644 \

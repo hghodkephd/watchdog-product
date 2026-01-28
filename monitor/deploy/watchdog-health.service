@@ -7,8 +7,8 @@ Wants=watchdog-monitor.service
 Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
-WorkingDirectory=__WATCHDOG_DIR__
-ExecStart=__WATCHDOG_DIR__/venv/bin/python health_check.py --serve --port 8502
+WorkingDirectory=__WATCHDOG_DIR__/monitor
+ExecStart=__WATCHDOG_DIR__/venv/bin/python __WATCHDOG_DIR__/monitor/health_check.py --serve --port 8502
 
 Restart=always
 RestartSec=10s

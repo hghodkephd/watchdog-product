@@ -11,18 +11,16 @@ SERVICE_DIR="/etc/systemd/system"
 
 echo "Removing Watchdog systemd services..."
 
-systemctl stop watchdog-dashboard.service watchdog-monitor.service watchdog-health.service || true
+systemctl stop watchdog-dashboard.service watchdog-monitor.service watchdog-health.service watchdog-bt-unblock.service || true
 
-systemctl disable watchdog-dashboard.service watchdog-monitor.service watchdog-health.service || true
+systemctl disable watchdog-dashboard.service watchdog-monitor.service watchdog-health.service watchdog-bt-unblock.service || true
 
 
 rm -f \
   "$SERVICE_DIR/watchdog-monitor.service" \
   "$SERVICE_DIR/watchdog-dashboard.service" \
-  "$SERVICE_DIR/watchdog-health.service"
-
-systemctl disable --now watchdog-bt-unblock.service || true
-rm -f "$SERVICE_DIR/watchdog-bt-unblock.service" || true
+  "$SERVICE_DIR/watchdog-health.service" \
+  "$SERVICE_DIR/watchdog-bt-unblock.service"
 
 systemctl daemon-reload
 

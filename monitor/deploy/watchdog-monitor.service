@@ -10,11 +10,11 @@ StartLimitBurst=5
 Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
-WorkingDirectory=__WATCHDOG_DIR__
+WorkingDirectory=__WATCHDOG_DIR__/monitor
 ExecStartPre=/usr/bin/test -x __WATCHDOG_DIR__/venv/bin/python
-ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/ble_watchdog.py
+ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/monitor/ble_watchdog.py
 
-ExecStart=__WATCHDOG_DIR__/venv/bin/python ble_watchdog.py
+ExecStart=__WATCHDOG_DIR__/venv/bin/python __WATCHDOG_DIR__/monitor/ble_watchdog.py
 
 Restart=always
 RestartSec=10s
