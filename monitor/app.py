@@ -760,10 +760,10 @@ with tab1:
                     now_dt = datetime.now(tz=user_tz)
                     
                     window_config = {
-                        "Hour": (timedelta(hours=1), 10, 360),      # 1h, 10s buckets, 360 points
-                        "Day": (timedelta(days=1), 300, 288),       # 24h, 5m buckets, 288 points
-                        "Week": (timedelta(weeks=1), 1800, 336),    # 7d, 30m buckets, 336 points
-                        "Month": (timedelta(days=30), 3600, 720),   # 30d, 1h buckets, 720 points
+                        "Hour": (timedelta(hours=1), 30, 120),      # 1h, 10s buckets, 360 points
+                        "Day": (timedelta(days=1), 600, 144),       # 24h, 5m buckets, 288 points
+                        "Week": (timedelta(weeks=1), 3600, 168),    # 7d, 30m buckets, 336 points
+                        "Month": (timedelta(days=30), 7200, 360),   # 30d, 1h buckets, 720 points
                     }
                     
                     delta, bucket_sec, max_points = window_config[time_window]
