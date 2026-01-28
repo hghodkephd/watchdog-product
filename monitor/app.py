@@ -75,9 +75,45 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Load config
-cfg = load_config()
+@st.cache_resource
+def get_app_config():
+    """Load and cache dashboard configuration."""
+    return load_config()
 
+def invalidate_app_config_cache() -> None:
+    """Force the next rerun to reload configuration from disk."""
+    try:
+        get_app_config.clear()
+    except Exception:
+        pass
+
+# Load config (cached)
+cfg = get_app_config()
+
+# ---------------------------------------------------------------------
+# Cached monitoring status (prevents repeated psutil/DB work on rerun)
+# ---------------------------------------------------------------------
+@st.cache_data(ttl=5)
+def get_cached_monitoring_status():
+    return get_monitoring_status()
+
+def invalidate_monitoring_status_cache() -> None:
+    try:
+        get_cached_monitoring_status.clear()
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------------
+# Global autorefresh scheduler (ensures only ONE st_autorefresh exists)
+# ---------------------------------------------------------------------
+# Reset desired refresh each rerun
+st.session_state["_autorefresh_interval_ms"] = None
+
+def schedule_autorefresh(interval_ms: int) -> None:
+    """Request a single global refresh; the smallest interval wins."""
+    cur = st.session_state.get("_autorefresh_interval_ms")
+    if cur is None or interval_ms < cur:
+        st.session_state["_autorefresh_interval_ms"] = interval_ms
 
 def is_first_run(cfg) -> bool:
     """
@@ -170,7 +206,7 @@ def render_onboarding(cfg, status):
                 st.session_state.pop("onboard_start_requested_at", None)
             elif elapsed < 10:  # 10s max wait
                 st.caption(f"Starting monitoring... auto-refreshing ({int(10 - elapsed)}s remaining)")
-                st_autorefresh(interval=500, limit=20, key="onboard_start_refresh")
+                schedule_autorefresh(500)
             else:
                 st.session_state.pop("onboard_start_requested_at", None)
                 st.warning("Monitoring is taking longer than expected. If it doesn’t start, try again.")
@@ -178,6 +214,7 @@ def render_onboarding(cfg, status):
             if st.button("▶️ Start Monitoring", type="primary", key="onboard_start"):
                 success, msg, pid = start_monitoring()
                 if success:
+                    invalidate_monitoring_status_cache()
                     st.success(msg)
                     # Trigger short polling window instead of blocking sleep
                     st.session_state.onboard_start_requested_at = time.time()
@@ -214,7 +251,7 @@ def render_onboarding(cfg, status):
             elapsed = time.time() - st.session_state.onboard_scan_started_at
             if elapsed < 120:  # 2 minute timeout
                 st.caption(f"Auto-refresh in 10s... ({int(120 - elapsed)}s until timeout)")
-                st_autorefresh(interval=10_000, limit=12, key="onboard_scan_refresh")
+                schedule_autorefresh(10_000)
                 if st.button("🔄 Refresh Now", key="onboard_manual_refresh"):
                     st.rerun()
             else:
@@ -286,7 +323,7 @@ def render_onboarding(cfg, status):
             elapsed = time.time() - st.session_state.onboard_complete_at
             if elapsed < 2:
                 st.caption("Finalizing setup...")
-                st_autorefresh(interval=500, limit=4, key="onboard_complete_refresh")
+                schedule_autorefresh(500)
             else:
                 st.session_state.pop("onboard_complete_at", None)
                 st.rerun()
@@ -468,7 +505,7 @@ with tab1:
     render_email_system_warning()
     
     # Check monitoring status
-    status = get_monitoring_status()
+    status = get_cached_monitoring_status()
     
     # === First-run onboarding ===
     is_onboarding = is_first_run(cfg)
@@ -554,6 +591,7 @@ with tab1:
             if st.button("▶️ Start", disabled=is_running, use_container_width=True):
                 success, msg, pid = start_monitoring()
                 if success:
+                    invalidate_monitoring_status_cache()
                     st.success(f"Started monitoring (PID {pid})")
                     time.sleep(1)
                     st.rerun()
@@ -564,6 +602,7 @@ with tab1:
             if st.button("⏹️ Stop", disabled=not is_running, use_container_width=True):
                 success, msg = stop_monitoring()
                 if success:
+                    invalidate_monitoring_status_cache()
                     st.success("Stopped monitoring")
                     time.sleep(1)
                     st.rerun()
@@ -624,7 +663,7 @@ with tab1:
                     st.caption(f"Auto-refresh in 15s ({remaining}s until timeout)...")
                     
                     # Streamlit-native auto-refresh (no full page reload)
-                    st_autorefresh(interval=15_000, limit=20, key="scan_refresh")
+                    schedule_autorefresh(15_000)
                     
                     if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
                         st.rerun()
@@ -792,7 +831,7 @@ with tab2:
     # --------------------
     # Detection (runtime truth, from DB)
     # --------------------
-    status = get_monitoring_status()
+    status = get_cached_monitoring_status()
     if not status.get("is_running", False):
         st.warning("Monitoring is not running. Click **Start** on the Monitoring tab to begin detection.")
     else:
@@ -852,7 +891,7 @@ with tab2:
                 st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
                 
                 # Streamlit-native refresh (no full-page reload)
-                st_autorefresh(interval=15_000, limit=20, key="setup_scan_refresh")
+                schedule_autorefresh(15_000)
                 
                 if st.button("🔄 Refresh Now", key="setup_manual_refresh"):
                     st.rerun()
@@ -912,6 +951,7 @@ with tab2:
 
             if added:
                 save_config(cfg)
+                invalidate_app_config_cache()
                 st.success(f"Added {added} sensor(s) to configuration.")
                 time.sleep(0.5)
                 st.rerun()
@@ -1109,6 +1149,7 @@ with tab2:
         with col_save:
             if st.button("💾 Save Configuration", type="primary"):
                 save_config(cfg)
+                invalidate_app_config_cache()
                 st.success("Configuration saved!")
                 time.sleep(0.5)
                 st.rerun()
@@ -1125,6 +1166,7 @@ with tab2:
                 for sid in to_remove:
                     cfg.sensors.pop(sid, None)
                 save_config(cfg)
+                invalidate_app_config_cache()
                 st.success(f"Removed {len(to_remove)} sensor(s).")
                 time.sleep(0.5)
                 st.rerun()
@@ -1241,6 +1283,7 @@ with tab3:
         if st.button("Change Location"):
             cfg.weather = None
             save_config(cfg)
+            invalidate_app_config_cache()
             st.rerun()
     
     else:
@@ -1262,6 +1305,7 @@ with tab3:
                         timezone=weather_point.timezone
                     )
                     save_config(cfg)
+                    invalidate_app_config_cache()
                     st.success(f"Location set: {weather_point.label}")
                     st.info(f"Detected timezone: {weather_point.timezone}")
                     time.sleep(1)
@@ -1331,7 +1375,7 @@ with tab3:
     # System info
     st.subheader("System Information")
     
-    status = get_monitoring_status()
+    status = get_cached_monitoring_status()
     
     # Show timezone info
     if cfg.weather:
@@ -1354,6 +1398,7 @@ with tab3:
     # Save settings
     if st.button("💾 Save All Settings", type="primary"):
         save_config(cfg)
+        invalidate_app_config_cache()
         st.success("Settings saved!")
         time.sleep(1)
         st.rerun()
@@ -1367,3 +1412,11 @@ with col_refresh:
     if st.button("🔄 Refresh Page", use_container_width=True, key="footer_refresh"):
         get_system_health.clear()
         st.rerun()
+
+# ---------------------------------------------------------------------
+# Global autorefresh (single timer per rerun)
+# ---------------------------------------------------------------------
+_interval = st.session_state.get("_autorefresh_interval_ms")
+if _interval:
+    # limit=1 ensures we don't accumulate multiple JS timers
+    st_autorefresh(interval=_interval, limit=1, key="global_autorefresh")
