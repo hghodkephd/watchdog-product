@@ -1,45 +1,74 @@
+# Section C (Audit): systemd hardening for Watchdog BLE Monitor Daemon
+#
+# Key changes from original:
+# - Added MemoryHigh=200M for gradual memory pressure handling
+# - MemoryMax=256M remains as hard ceiling
+# - Restart=always ensures automatic recovery
+# - RestartSec=10s balances quick recovery with avoiding rapid loops
+# - OOMScoreAdjust=-500 protects monitor daemon from OOM kills
+# - WatchdogSec=120 with sd_notify for health monitoring
+# - Nice=-5 for priority boost to ensure reliable BLE scanning
+
 [Unit]
 Description=Watchdog Environmental Monitor - BLE Service
 After=network-online.target bluetooth.service
 Wants=network-online.target bluetooth.service
+
+# Prevent rapid restart loops
 StartLimitIntervalSec=300
 StartLimitBurst=5
-
 
 [Service]
 Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
 WorkingDirectory=__WATCHDOG_DIR__/monitor
+
+# Pre-start checks
 ExecStartPre=/usr/bin/test -x __WATCHDOG_DIR__/venv/bin/python
 ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/monitor/ble_watchdog.py
 
+# Main command
 ExecStart=__WATCHDOG_DIR__/venv/bin/python __WATCHDOG_DIR__/monitor/ble_watchdog.py
 
+# Section C: Restart policy - always restart on failure
 Restart=always
 RestartSec=10s
+
+# Systemd watchdog - service must call sd_notify within this interval
 WatchdogSec=120
 NotifyAccess=main
-Environment=PYTHONUNBUFFERED=1
 
+# Environment
+Environment=PYTHONUNBUFFERED=1
+# Uncomment to enable memory probes (Section A):
+# Environment=WATCHDOG_MEM_PROBES=1
+
+# Section C: Memory limits for Pi Zero 2 W / Pi 3
+# MemoryHigh: Soft limit - system starts reclaiming when exceeded
+# MemoryMax: Hard limit - process killed if exceeded
+# Monitor daemon uses less memory than dashboard, so lower limits
+MemoryHigh=200M
 MemoryMax=256M
+
+# CPU limit - allow monitor more CPU than dashboard for BLE scanning
 CPUQuota=80%
-# Strongly protect the monitor daemon from OOM kills.
-# The dashboard service should be killed first if memory pressure occurs.
+
+# Section C: OOM priority - strongly protect monitor daemon
+# Lower score = less likely to be killed (dashboard will be killed first)
 OOMScoreAdjust=-500
 
-
-# Nice=-5 gives moderate priority boost for reliable sensor polling.
-# This ensures BLE scanning isn't starved by other processes on the Pi.
-# Safe for Pi Zero 2 W. Adjust to 0 if you run other critical services.
+# Nice=-5 gives moderate priority boost for reliable sensor polling
+# Ensures BLE scanning isn't starved by other processes
 Nice=-5
 
+# Logging to systemd journal
 StandardOutput=journal
 StandardError=journal
 
+# Shutdown handling
 KillMode=mixed
 TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
-

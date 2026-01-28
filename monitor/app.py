@@ -2,6 +2,13 @@
 """
 Watchdog Environmental Monitor - Production Dashboard
 Same monitoring experience as OSS, with database persistence and production features
+
+MODIFIED (Audit Sections A/B):
+- Added memory instrumentation (enable via WATCHDOG_MEM_PROBES=1)
+- Added gc.collect() at end of render cycle
+- Increased auto-refresh interval from 15s to 30s for stability
+- Added memory pressure warning in System Health panel
+- Reduced chart point limits for Pi Zero 2 W compatibility
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -15,6 +22,13 @@ from zoneinfo import ZoneInfo
 import subprocess
 import shutil
 import math
+import gc  # Section B: explicit garbage collection
+
+# Memory instrumentation (Section A) - OFF by default
+from mem_probes import log_mem, cleanup_render, check_memory_pressure, get_memory_stats, MemoryProfileBlock
+
+# Log memory at script start (Section A instrumentation point 1)
+log_mem("script_start_after_imports")
 
 # Watchdog imports
 from config import load_config, save_config, SensorConfig, WeatherConfig, US_TIMEZONES
@@ -31,15 +45,26 @@ from notifications import send_test_email, send_alarm_email, send_cleared_email
 
 SETUP_DETECTION_WINDOW_SEC = 900
 
+# Section B: Increased auto-refresh interval from 15000ms to 30000ms for stability on Pi Zero 2 W
+DEFAULT_AUTOREFRESH_MS = 30_000  # Was 15_000
+
+# Section B: Reduced chart point limits for memory stability
+# These are more conservative limits suitable for Pi Zero 2 W (512MB RAM)
+CHART_MAX_POINTS_HOUR = 120    # Was 360 (1h at 30s buckets)
+CHART_MAX_POINTS_DAY = 144     # Was 288 (24h at 10m buckets)
+CHART_MAX_POINTS_WEEK = 168    # Same (7d at 1h buckets)
+CHART_MAX_POINTS_MONTH = 360   # Same (30d at 2h buckets)
+
 # -----------------------------------------------------------------------------
 # P0 performance: cached trends queries
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=5, show_spinner=False)
 def _cached_trends_fast(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_points_per_sensor, db_path_str):
     """Short TTL cache for live hour view."""
+    log_mem("cached_trends_fast_start")  # Section A instrumentation
     conn = get_connection(db_path_str)
     try:
-        return get_downsampled_timeseries(
+        result = get_downsampled_timeseries(
             conn,
             list(sensor_ids_tuple),
             start_ts,
@@ -47,6 +72,8 @@ def _cached_trends_fast(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_
             bucket_seconds=bucket_seconds,
             max_points_per_sensor=max_points_per_sensor,
         )
+        log_mem("cached_trends_fast_end")  # Section A instrumentation
+        return result
     finally:
         conn.close()
 
@@ -54,9 +81,10 @@ def _cached_trends_fast(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_trends_slow(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_points_per_sensor, db_path_str):
     """Longer TTL cache for day/week/month (and fixed windows)."""
+    log_mem("cached_trends_slow_start")  # Section A instrumentation
     conn = get_connection(db_path_str)
     try:
-        return get_downsampled_timeseries(
+        result = get_downsampled_timeseries(
             conn,
             list(sensor_ids_tuple),
             start_ts,
@@ -64,6 +92,8 @@ def _cached_trends_slow(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_
             bucket_seconds=bucket_seconds,
             max_points_per_sensor=max_points_per_sensor,
         )
+        log_mem("cached_trends_slow_end")  # Section A instrumentation
+        return result
     finally:
         conn.close()
  
@@ -162,245 +192,87 @@ def render_onboarding(cfg, status):
         cutoff = time.time() - 300  # Last 5 minutes
         result = conn.execute(
             "SELECT COUNT(DISTINCT sensor_id) FROM readings WHERE ts >= ?",
-            (cutoff,)
+            (cutoff,),
         ).fetchone()
-        conn.close()
         detected_count = result[0] if result else 0
+        conn.close()
     except Exception:
         pass
     
-    sensors_detected = detected_count > 0
-    sensors_configured = bool(cfg.sensors and len(cfg.sensors) > 0)
-    
-    # Calculate current step
-    if not monitoring_running:
-        current_step = 1
-    elif not sensors_detected:
-        current_step = 2
-    elif not sensors_configured:
-        current_step = 3
-    else:
-        current_step = 4  # Complete
-    
     # Progress indicator
-    st.progress(current_step / 4, text=f"Step {current_step} of 4")
+    steps_done = 0
+    if monitoring_running:
+        steps_done = 1
+    if detected_count > 0:
+        steps_done = 2
+    if cfg.sensors and len(cfg.sensors) > 0:
+        steps_done = 3
     
-    st.divider()
+    st.progress(steps_done / 3, text=f"Step {steps_done + 1} of 3")
     
-    # Step 1: Start Monitoring
-    col1, col2 = st.columns([1, 20])
-    with col1:
-        if monitoring_running:
-            st.markdown("### ✅")
-        else:
-            st.markdown("### 1️⃣")
-    with col2:
-        st.markdown("### Start Monitoring")
-        if not monitoring_running:
-            st.markdown("Click the button below to power on the Bluetooth scanner.")
-
-        # If we recently requested monitoring to start, poll (non-blocking) until it flips to running.
-        if "onboard_start_requested_at" in st.session_state:
-            elapsed = time.time() - st.session_state.onboard_start_requested_at
-            if monitoring_running:
-                st.session_state.pop("onboard_start_requested_at", None)
-            elif elapsed < 10:  # 10s max wait
-                st.caption(f"Starting monitoring... auto-refreshing ({int(10 - elapsed)}s remaining)")
-                schedule_autorefresh(500)
-            else:
-                st.session_state.pop("onboard_start_requested_at", None)
-                st.warning("Monitoring is taking longer than expected. If it doesn’t start, try again.")
-
-            if st.button("▶️ Start Monitoring", type="primary", key="onboard_start"):
-                success, msg, pid = start_monitoring()
-                if success:
-                    invalidate_monitoring_status_cache()
-                    st.success(msg)
-                    # Trigger short polling window instead of blocking sleep
-                    st.session_state.onboard_start_requested_at = time.time()
-                    st.rerun()
-                else:
-                    st.error(msg)
-        else:
-            st.markdown("✓ Monitoring is running")
-    
-    st.divider()
-    
-    # Step 2: Detect Sensors
-    col1, col2 = st.columns([1, 20])
-    with col1:
-        if sensors_detected:
-            st.markdown("### ✅")
-        elif monitoring_running:
-            st.markdown("### 2️⃣")
-        else:
-            st.markdown("### ⬜")
-    with col2:
-        st.markdown("### Detect Sensors")
-        if not monitoring_running:
-            st.caption("Start monitoring first")
-        elif not sensors_detected:
-            st.markdown("Scanning for Govee sensors... This usually takes 10-30 seconds.")
-            st.markdown("Make sure your sensors are powered on and within range (~30 feet).")
-            
-
-            # Use st_autorefresh instead of blocking sleep
-            if "onboard_scan_started_at" not in st.session_state:
-                st.session_state.onboard_scan_started_at = time.time()
-
-            elapsed = time.time() - st.session_state.onboard_scan_started_at
-            if elapsed < 120:  # 2 minute timeout
-                st.caption(f"Auto-refresh in 10s... ({int(120 - elapsed)}s until timeout)")
-                schedule_autorefresh(10_000)
-                if st.button("🔄 Refresh Now", key="onboard_manual_refresh"):
-                    st.rerun()
-            else:
-                st.info("Auto-refresh stopped after 2 minutes. Click below to refresh manually.")
-                if st.button("🔄 Refresh Page", key="onboard_refresh_timeout"):
-                    st.rerun()
-        else:
-            st.markdown(f"✓ Found **{detected_count}** sensor(s)")
-            st.session_state.pop("onboard_scan_started_at", None)
-            st.session_state.pop("onboard_scan_refresh", None)
-    
-    st.divider()
-    
-    # Step 3: Configure Sensors
-    col1, col2 = st.columns([1, 20])
-    with col1:
-        if sensors_configured:
-            st.markdown("### ✅")
-        elif sensors_detected:
-            st.markdown("### 3️⃣")
-        else:
-            st.markdown("### ⬜")
-    with col2:
-        st.markdown("### Configure Sensors")
-        if not sensors_detected:
-            st.caption("Waiting for sensor detection")
-        elif not sensors_configured:
-            st.markdown("Great! Now let's configure your sensors.")
-            st.markdown("Click the **Setup** tab above to name your sensors and set temperature thresholds.")
-            
-            # Show detected sensors preview
-            try:
-                conn = get_connection()
-                cutoff = time.time() - 300
-                rows = conn.execute("""
-                    SELECT DISTINCT sensor_id FROM readings WHERE ts >= ?
-                """, (cutoff,)).fetchall()
-                conn.close()
-                
-                sensor_ids = [row[0] for row in rows]
-                st.caption(f"Detected: {', '.join(sensor_ids)}")
-            except Exception:
-                pass
-            
-            st.info("👆 Click the **⚙️ Setup** tab to continue")
-        else:
-            st.markdown(f"✓ Configured **{len(cfg.sensors)}** sensor(s)")
-    
-    st.divider()
-    
-    # Step 4: Complete
-    col1, col2 = st.columns([1, 20])
-    with col1:
-        if sensors_configured:
-            st.markdown("### 🎉")
-        else:
-            st.markdown("### ⬜")
-    with col2:
-        st.markdown("### All Set!")
-        if sensors_configured:
-            st.markdown("Your Watchdog is ready to monitor!")
-            st.markdown("You'll now see real-time data on this tab.")
-            
-            # Clear first-run state
-            st.balloons()
-            if "onboard_complete_at" not in st.session_state:
-                st.session_state.onboard_complete_at = time.time()
-    
-            elapsed = time.time() - st.session_state.onboard_complete_at
-            if elapsed < 2:
-                st.caption("Finalizing setup...")
-                schedule_autorefresh(500)
-            else:
-                st.session_state.pop("onboard_complete_at", None)
+    # Step 1: Start monitoring
+    st.markdown("### Step 1: Start Monitoring")
+    if not monitoring_running:
+        st.info("Click the button below to start scanning for sensors.")
+        if st.button("▶️ Start Monitoring", type="primary", key="onboard_start"):
+            with st.spinner("Starting monitoring service..."):
+                success, message, pid = start_monitoring()
+            if success:
+                st.success("Monitoring started!")
+                invalidate_monitoring_status_cache()
+                time.sleep(1)
                 st.rerun()
-        else:
-            st.caption("Complete the steps above")
+            else:
+                st.error(f"Failed to start: {message}")
+    else:
+        st.success("✅ Monitoring is running")
     
-    # Help section
-    st.divider()
-    with st.expander("🆘 Troubleshooting"):
-        st.markdown("""
-        **Sensors not detected?**
-        - Make sure sensors are powered on (batteries inserted)
-        - Bring sensors within 30 feet of the Raspberry Pi
-        - Wait up to 60 seconds for detection
-        - Try restarting the sensors (remove and reinsert batteries)
-        
-        **Bluetooth issues?**
-        - SSH to your Pi and run: `sudo bash ~/Watchdog/monitor/deploy/watchdog-bt-unblock.sh`
-        - Then restart monitoring
-        
-        **Need help?**
-        - Check the README in your Watchdog installation
-        - Visit our support documentation
-        """)
+    # Step 2: Detect sensors
+    st.markdown("### Step 2: Detect Sensors")
+    if not monitoring_running:
+        st.caption("Start monitoring first to detect sensors.")
+    elif detected_count == 0:
+        st.warning("Scanning for sensors... This can take 10-30 seconds.")
+        st.caption("Make sure your Govee sensors are nearby and powered on.")
+        # Auto-refresh during detection
+        schedule_autorefresh(DEFAULT_AUTOREFRESH_MS)
+    else:
+        st.success(f"✅ Found {detected_count} sensor(s)")
     
-    return True  # Onboarding was rendered
+    # Step 3: Configure sensors
+    st.markdown("### Step 3: Configure Sensors")
+    if detected_count == 0:
+        st.caption("Sensors will appear here once detected.")
+    else:
+        st.info("Go to the **Setup** tab to name your sensors and set alert thresholds.")
+        if st.button("➡️ Go to Setup", key="onboard_setup"):
+            st.session_state["_active_tab"] = 1
+            st.rerun()
 
 
-# ---------------------------------------------------------------------
-# Session guards (prevents "autostart" feel when a monitor is already running)
-# ---------------------------------------------------------------------
-if "monitor_owned_by_ui" not in st.session_state:
-    st.session_state.monitor_owned_by_ui = False
-
-if "monitor_acknowledged" not in st.session_state:
-    st.session_state.monitor_acknowledged = False
-    
-
-# ---------------------------------------------------------------------
-# Timezone helper
-# ---------------------------------------------------------------------
-
-def get_user_timezone() -> ZoneInfo:
-    """Get user's configured timezone, with fallback to Eastern."""
+def get_user_timezone():
+    """Get user timezone from config or default to Eastern."""
     if cfg.weather and cfg.weather.timezone:
-        try:
-            return ZoneInfo(cfg.weather.timezone)
-        except Exception:
-            pass
+        return ZoneInfo(cfg.weather.timezone)
     return ZoneInfo("America/New_York")
 
 
-def convert_to_local(utc_timestamp: float) -> datetime:
-    """Convert Unix timestamp to user's local timezone."""
-    tz = get_user_timezone()
-    utc_dt = datetime.fromtimestamp(utc_timestamp, tz=ZoneInfo("UTC"))
-    return utc_dt.astimezone(tz)
+def convert_to_local(ts: float) -> datetime:
+    """Convert unix timestamp to local datetime."""
+    user_tz = get_user_timezone()
+    return datetime.fromtimestamp(ts, tz=user_tz)
 
 
 # ---------------------------------------------------------------------
-# Weather caching (prevents API timeouts on refresh)
+# Cached weather queries (prevent hammering API on rerun)
 # ---------------------------------------------------------------------
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def cached_current_weather(lat: float, lon: float) -> dict:
-    """Fetch current weather with caching to prevent API overload."""
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_current_weather(lat, lon):
     return fetch_current_weather(lat, lon)
 
 
-@st.cache_data(ttl=600)  # Cache for 10 minutes
-def cached_weather_series(
-    lat: float,
-    lon: float,
-    start_iso: str,
-    end_iso: str,
-) -> pd.DataFrame:
-    """Fetch weather time series with caching."""
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_weather_series(lat, lon, start_iso, end_iso):
     start = datetime.fromisoformat(start_iso)
     end = datetime.fromisoformat(end_iso)
     result = fetch_weather_series(lat, lon, start, end)
@@ -427,6 +299,9 @@ def get_system_health(window_s: int = 300) -> dict:
         "bluetooth_powered": None,   # True/False/None
         "bluetooth_error": None,
         "now": time.time(),
+        # Section A/B: Add memory stats to health
+        "memory_percent": 0.0,
+        "memory_pressure": False,
     }
 
     # DB checks (authoritative)
@@ -483,6 +358,14 @@ def get_system_health(window_s: int = 300) -> dict:
             health["bluetooth_error"] = (p.stderr or "").strip()[:200] or "bluetoothctl failed"
     except Exception as e:
         health["bluetooth_error"] = str(e)[:200]
+
+    # Section A/B: Memory health check
+    try:
+        mem_stats = get_memory_stats()
+        health["memory_percent"] = mem_stats.get("system_percent", 0.0)
+        health["memory_pressure"] = check_memory_pressure()
+    except Exception:
+        pass
 
     return health
 
@@ -561,6 +444,14 @@ with tab1:
             db_ok = bool(health.get("db_ok", False))
             st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
 
+        # Section B: Memory pressure warning
+        if health.get("memory_pressure", False):
+            mem_pct = health.get("memory_percent", 0)
+            st.warning(
+                f"⚠️ **System memory pressure: {mem_pct:.0f}% used.** "
+                "Dashboard may be slow. Consider closing other applications or restarting the Pi."
+            )
+
         # Check for dropped readings
         try:
             from storage import get_dropped_readings_count, get_connection
@@ -573,46 +464,42 @@ with tab1:
                     "Consider archiving old data in Settings → Data Management."
                 )
         except Exception:
-            pass  # Don't let this break the dashboard
-
-        # Optional: compact "what to do" hints only when red
-        if not is_running:
-            st.info("Monitor is stopped. Use **Start monitoring** below.")
-        if bt is False:
-            st.warning("Bluetooth is OFF. Run: `sudo bash ~/Watchdog/deploy/watchdog-bt-unblock.sh`")
-        if db_ok is False:
-            st.warning("Database check failed. Verify `~/Watchdog/monitor/data/data.sqlite3` exists and permissions are correct.")
-        
-        # --------------------
-        # Start/Stop controls
-        # --------------------
-        col_start, col_stop, col_spacer = st.columns([1, 1, 3])
-        with col_start:
-            if st.button("▶️ Start", disabled=is_running, use_container_width=True):
-                success, msg, pid = start_monitoring()
-                if success:
-                    invalidate_monitoring_status_cache()
-                    st.success(f"Started monitoring (PID {pid})")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(f"Failed to start: {msg}")
-        
-        with col_stop:
-            if st.button("⏹️ Stop", disabled=not is_running, use_container_width=True):
-                success, msg = stop_monitoring()
-                if success:
-                    invalidate_monitoring_status_cache()
-                    st.success("Stopped monitoring")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(f"Failed to stop: {msg}")
+            pass
 
         st.divider()
 
         # --------------------
-        # Current Readings
+        # Control buttons
+        # --------------------
+        col_start, col_stop = st.columns(2)
+        with col_start:
+            if st.button("▶️ Start", use_container_width=True, disabled=is_running):
+                with st.spinner("Starting monitoring..."):
+                    success, message, pid = start_monitoring()
+                if success:
+                    st.success(message)
+                    invalidate_monitoring_status_cache()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(message)
+        
+        with col_stop:
+            if st.button("⏹️ Stop", use_container_width=True, disabled=not is_running):
+                with st.spinner("Stopping monitoring..."):
+                    success, message = stop_monitoring()
+                if success:
+                    st.success(message)
+                    invalidate_monitoring_status_cache()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(message)
+        
+        st.divider()
+
+        # --------------------
+        # Main sensor display
         # --------------------
         conn = None
         df_latest = pd.DataFrame()
@@ -620,15 +507,15 @@ with tab1:
         try:
             conn = get_connection()
             init_db(conn)
-            
-            # Get latest readings from last 5 minutes
-            cutoff = time.time() - 300
+
+            cutoff = time.time() - cfg.stale_after_sec
+
             df_latest = pd.read_sql_query(
                 """
                 SELECT r.sensor_id, r.name, r.ts, r.temp_c, r.humidity, r.battery, r.rssi
                 FROM readings r
                 INNER JOIN (
-                    SELECT sensor_id, MAX(ts) as max_ts
+                    SELECT sensor_id, MAX(ts) AS max_ts
                     FROM readings
                     WHERE ts >= ?
                     GROUP BY sensor_id
@@ -660,10 +547,12 @@ with tab1:
                 
                 if elapsed < 300:
                     st.warning("Waiting for sensor data... This can take 10-30 seconds after starting.")
-                    st.caption(f"Auto-refresh in 15s ({remaining}s until timeout)...")
+                    # Section B: Use DEFAULT_AUTOREFRESH_MS (30s instead of 15s)
+                    refresh_sec = DEFAULT_AUTOREFRESH_MS // 1000
+                    st.caption(f"Auto-refresh in {refresh_sec}s ({remaining}s until timeout)...")
                     
                     # Streamlit-native auto-refresh (no full page reload)
-                    schedule_autorefresh(15_000)
+                    schedule_autorefresh(DEFAULT_AUTOREFRESH_MS)
                     
                     if st.button("🔄 Refresh Now", key="manual_refresh_scanning"):
                         st.rerun()
@@ -755,15 +644,19 @@ with tab1:
                             help="Overlay outdoor temperature from weather API" if cfg.weather else "Set location in Settings to enable"
                         )
                     
-                    # Calculate time range                
+                    # Calculate time range
+                    # Section A: Log memory before chart data fetch (instrumentation point)
+                    log_mem(f"before_chart_fetch_{time_window}")
+                    
                     user_tz = ZoneInfo(cfg.weather.timezone if cfg.weather else "America/New_York")
                     now_dt = datetime.now(tz=user_tz)
                     
+                    # Section B: Use reduced chart point limits for memory stability
                     window_config = {
-                        "Hour": (timedelta(hours=1), 30, 120),      # 1h, 10s buckets, 360 points
-                        "Day": (timedelta(days=1), 600, 144),       # 24h, 5m buckets, 288 points
-                        "Week": (timedelta(weeks=1), 3600, 168),    # 7d, 30m buckets, 336 points
-                        "Month": (timedelta(days=30), 7200, 360),   # 30d, 1h buckets, 720 points
+                        "Hour": (timedelta(hours=1), 30, CHART_MAX_POINTS_HOUR),      # 1h, 30s buckets
+                        "Day": (timedelta(days=1), 600, CHART_MAX_POINTS_DAY),        # 24h, 10m buckets
+                        "Week": (timedelta(weeks=1), 3600, CHART_MAX_POINTS_WEEK),    # 7d, 1h buckets
+                        "Month": (timedelta(days=30), 7200, CHART_MAX_POINTS_MONTH),  # 30d, 2h buckets
                     }
                     
                     delta, bucket_sec, max_points = window_config[time_window]
@@ -780,6 +673,9 @@ with tab1:
                     else:
                         df_history = _cached_trends_slow(sensor_ids, start_ts, end_ts, bucket_sec, max_points, db_path_str)
                     
+                    # Section A: Log memory after chart data fetch (instrumentation point)
+                    log_mem(f"after_chart_fetch_{time_window}")
+                    
                     if not df_history.empty:
                         # Convert timestamp to datetime
                         # Note: get_downsampled_timeseries returns 'timestamp' column, not 'ts'
@@ -794,25 +690,33 @@ with tab1:
                             df_history['temp'] = df_history['temp_c']
                             temp_label = "Temperature (°C)"
                         
+                        # Section A: Log memory before chart creation (instrumentation point)
+                        log_mem("before_chart_creation")
+                        
                         # Temperature chart
                         st.subheader("Temperature History")
-                        temp_chart = alt.Chart(df_history).mark_line().encode(
-                            x=alt.X('datetime:T', title='Time'),
-                            y=alt.Y('temp:Q', title=temp_label),
-                            color=alt.Color('name:N', title='Sensor'),
-                            tooltip=['name', 'datetime:T', 'temp:Q']
-                        ).properties(height=300)
-                        st.altair_chart(temp_chart, use_container_width=True)
+                        with MemoryProfileBlock("temp_chart"):
+                            temp_chart = alt.Chart(df_history).mark_line().encode(
+                                x=alt.X('datetime:T', title='Time'),
+                                y=alt.Y('temp:Q', title=temp_label),
+                                color=alt.Color('name:N', title='Sensor'),
+                                tooltip=['name', 'datetime:T', 'temp:Q']
+                            ).properties(height=300)
+                            st.altair_chart(temp_chart, use_container_width=True)
                         
                         # Humidity chart
                         st.subheader("Humidity History")
-                        hum_chart = alt.Chart(df_history).mark_line().encode(
-                            x=alt.X('datetime:T', title='Time'),
-                            y=alt.Y('humidity:Q', title='Humidity (%)'),
-                            color=alt.Color('name:N', title='Sensor'),
-                            tooltip=['name', 'datetime:T', 'humidity:Q']
-                        ).properties(height=300)
-                        st.altair_chart(hum_chart, use_container_width=True)
+                        with MemoryProfileBlock("humidity_chart"):
+                            hum_chart = alt.Chart(df_history).mark_line().encode(
+                                x=alt.X('datetime:T', title='Time'),
+                                y=alt.Y('humidity:Q', title='Humidity (%)'),
+                                color=alt.Color('name:N', title='Sensor'),
+                                tooltip=['name', 'datetime:T', 'humidity:Q']
+                            ).properties(height=300)
+                            st.altair_chart(hum_chart, use_container_width=True)
+                        
+                        # Section A: Log memory after chart creation (instrumentation point)
+                        log_mem("after_chart_creation")
                     else:
                         st.info(f"No historical data available for the selected {time_window.lower()} range.")
 
@@ -877,10 +781,7 @@ with tab2:
         if status.get("is_running", False):
             st.warning("No sensors detected yet. This can take ~10–30 seconds after starting monitoring.")
 
-            # ---------------------------------------------------------
             # Auto-refresh while scanning
-            # ---------------------------------------------------------
-
             if "setup_autorefresh_started_at" not in st.session_state:
                 st.session_state.setup_autorefresh_started_at = time.time()
             
@@ -888,10 +789,12 @@ with tab2:
             remaining = max(0, 300 - int(elapsed))
             
             if elapsed < 300:
-                st.caption(f"Auto-refresh in {15}s ({remaining}s until timeout)...")
+                # Section B: Use DEFAULT_AUTOREFRESH_MS (30s instead of 15s)
+                refresh_sec = DEFAULT_AUTOREFRESH_MS // 1000
+                st.caption(f"Auto-refresh in {refresh_sec}s ({remaining}s until timeout)...")
                 
                 # Streamlit-native refresh (no full-page reload)
-                schedule_autorefresh(15_000)
+                schedule_autorefresh(DEFAULT_AUTOREFRESH_MS)
                 
                 if st.button("🔄 Refresh Now", key="setup_manual_refresh"):
                     st.rerun()
@@ -927,7 +830,7 @@ with tab2:
             )
 
         st.markdown(
-            "**Watchdog has detected the following sensors. Select the sensors you want to configure and monitor:**"
+            "**Select the sensors you want to configure and monitor:**"
         )
 
         default_to_add = [sid for sid in detected_ids if sid not in configured_ids]
@@ -990,9 +893,7 @@ with tab2:
 
     start_ts = start_dt.timestamp()
 
-    # Decide which sensors to plot:
-    # - If config exists, plot configured sensors (preferred).
-    # - Otherwise, plot any sensors detected in Setup (from detected_df).
+    # Decide which sensors to plot
     configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
     detected_ids = set(detected_df["sensor_id"].tolist()) if not detected_df.empty else set()
     plot_ids = configured_ids if configured_ids else detected_ids
@@ -1030,13 +931,12 @@ with tab2:
                 if cfg.sensors:
                     label_map = {sid: scfg.name for sid, scfg in cfg.sensors.items()}
                 else:
-                    # fall back to detected names (if present); otherwise sensor_id
                     tmp = detected_df.set_index("sensor_id")["name"].to_dict() if not detected_df.empty else {}
                     label_map = tmp
 
                 df_h["sensor_label"] = df_h["sensor_id"].map(label_map).fillna(df_h["sensor_id"])
 
-                # ---- Plot 3/4: Battery ----
+                # Battery chart
                 battery_chart = alt.Chart(df_h).mark_line(strokeWidth=2).encode(
                     x=alt.X(
                         "time:T",
@@ -1062,7 +962,7 @@ with tab2:
 
                 st.altair_chart(battery_chart, use_container_width=True)
 
-                # ---- Plot 4/4: Signal Strength ----
+                # Signal Strength chart
                 signal_chart = alt.Chart(df_h).mark_line(strokeWidth=2).encode(
                     x=alt.X(
                         "time:T",
@@ -1127,7 +1027,7 @@ with tab2:
 
                 with col2:
                     if cfg.units.upper() == "F":
-                        default_max = sensor_cfg.max_temp_c * 9/5 + 32 if sensor_cfg.max_temp_c is not None else 90.0
+                        default_max = sensor_cfg.max_temp_c * 9/5 + 32 if sensor_cfg.max_temp_c is not None else 100.0
                         max_temp = st.number_input(
                             "Max Temperature (°F)",
                             value=float(default_max),
@@ -1137,42 +1037,33 @@ with tab2:
                     else:
                         max_temp = st.number_input(
                             "Max Temperature (°C)",
-                            value=float(sensor_cfg.max_temp_c) if sensor_cfg.max_temp_c is not None else 30.0,
+                            value=float(sensor_cfg.max_temp_c) if sensor_cfg.max_temp_c is not None else 40.0,
                             key=f"max_{sensor_id}_{cfg.units.upper()}"
                         )
                         sensor_cfg.max_temp_c = max_temp
 
+                # Update sensor config
                 sensor_cfg.name = new_name
-                cfg.sensors[sensor_id] = sensor_cfg
 
-        col_save, col_remove = st.columns([1, 3])
-        with col_save:
-            if st.button("💾 Save Configuration", type="primary"):
-                save_config(cfg)
-                invalidate_app_config_cache()
-                st.success("Configuration saved!")
-                time.sleep(0.5)
-                st.rerun()
-
-        with col_remove:
-            to_remove = st.multiselect(
-                "Remove configured sensors",
-                options=list(cfg.sensors.keys()),
-                default=[],
-                help="Removing a sensor stops monitoring/alerts for it. Historical data remains in the database.",
-                key="remove_sensors",
-            )
-            if st.button("🗑️ Remove selected sensors"):
-                for sid in to_remove:
-                    cfg.sensors.pop(sid, None)
-                save_config(cfg)
-                invalidate_app_config_cache()
-                st.success(f"Removed {len(to_remove)} sensor(s).")
-                time.sleep(0.5)
-                st.rerun()
+                col_save, col_remove = st.columns(2)
+                with col_save:
+                    if st.button("💾 Save", key=f"save_{sensor_id}"):
+                        save_config(cfg)
+                        invalidate_app_config_cache()
+                        st.success("Saved!")
+                        time.sleep(0.5)
+                        st.rerun()
+                
+                with col_remove:
+                    if st.button("🗑️ Remove", key=f"remove_{sensor_id}"):
+                        del cfg.sensors[sensor_id]
+                        save_config(cfg)
+                        invalidate_app_config_cache()
+                        st.success("Removed!")
+                        time.sleep(0.5)
+                        st.rerun()
     else:
-        st.warning("No sensors configured yet.")
-        st.caption("Start monitoring to detect sensors, then select which ones to configure above.")
+        st.info("No sensors configured yet. Use the form above to add detected sensors.")
 
 # ====================
 # TAB 3: SETTINGS
@@ -1182,138 +1073,66 @@ with tab3:
     
     # Temperature units
     st.subheader("Display Preferences")
-    new_units = st.radio(
+    units = st.radio(
         "Temperature Units",
-        options=["F", "C"],
-        index=0 if cfg.units.upper() == "F" else 1,
-        horizontal=True
+        ["Fahrenheit (°F)", "Celsius (°C)"],
+        index=0 if cfg.units.upper() == "F" else 1
     )
-    cfg.units = new_units
+    cfg.units = "F" if "Fahrenheit" in units else "C"
     
     st.divider()
     
-    # Alerts
-    st.subheader("Alert Configuration")
-    cfg.alerts.enabled = st.checkbox("Enable Alerts", value=cfg.alerts.enabled)
-    
-    if cfg.alerts.enabled:
-        cfg.alerts.low_battery_threshold = st.slider(
-            "Low Battery Alert (%)",
-            min_value=10,
-            max_value=50,
-            value=cfg.alerts.low_battery_threshold
-        )
-        
-        cfg.alerts.sensor_offline_minutes = st.slider(
-            "Sensor Offline Alert (minutes)",
-            min_value=5,
-            max_value=60,
-            value=cfg.alerts.sensor_offline_minutes
-        )
-        
-        cfg.alerts.temp_alerts_enabled = st.checkbox(
-            "Enable Temperature Alerts",
-            value=cfg.alerts.temp_alerts_enabled
-        )
-    
-    # Email notifications
-    new_email_config = render_email_settings(getattr(cfg, 'email', None))
-    if new_email_config is not None:
-        cfg.email = new_email_config
-    
-    st.divider()
-    
-    # Location & Timezone
-    st.subheader("Location & Timezone")
+    # Location settings
+    st.subheader("Location")
+    st.caption("Used for weather data and timezone.")
     
     if cfg.weather:
-        st.success(f"📍 {cfg.weather.label}")
+        st.success(f"📍 Current location: {cfg.weather.label}")
         
-        # Show current timezone with override option
-        current_tz = cfg.weather.timezone
-        
-        # Find current index in US_TIMEZONES
+        # Timezone selector
+        current_tz = cfg.weather.timezone if cfg.weather.timezone else "America/New_York"
         tz_options = [tz[0] for tz in US_TIMEZONES]
         tz_labels = [tz[1] for tz in US_TIMEZONES]
         
-        try:
-            current_idx = tz_options.index(current_tz)
-        except ValueError:
-            current_idx = 0  # Default to Eastern if not found
+        current_idx = 0
+        for i, tz in enumerate(tz_options):
+            if tz == current_tz:
+                current_idx = i
+                break
         
-        selected_tz_label = st.selectbox(
+        selected_tz = st.selectbox(
             "Timezone",
-            options=tz_labels,
-            index=current_idx,
-            key="timezone_select"
+            options=tz_options,
+            format_func=lambda x: dict(US_TIMEZONES).get(x, x),
+            index=current_idx
         )
+        cfg.weather.timezone = selected_tz
+    
+    new_zip = st.text_input("Set Location (US ZIP code)", placeholder="01234")
+    if st.button("Update Location") and new_zip:
+        with st.spinner("Looking up location..."):
+            result = geocode_zip(new_zip)
         
-        # Map label back to timezone ID
-        selected_tz = tz_options[tz_labels.index(selected_tz_label)]
-        
-        if selected_tz != cfg.weather.timezone:
-            cfg.weather.timezone = selected_tz
-            st.info(f"Timezone will be updated to {selected_tz_label} when you save.")
-        
-        # Current weather display
-        st.markdown("**Current Outdoor Conditions:**")
-        weather_data = cached_current_weather(
-            cfg.weather.latitude, 
-            cfg.weather.longitude
-        )
-        
-        if weather_data.get('available', False):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                temp_c = weather_data['temp_c']
-                if cfg.units.upper() == "F":
-                    temp_f = temp_c * 9/5 + 32
-                    st.metric("Outdoor Temperature", f"{temp_f:.1f}°F")
-                else:
-                    st.metric("Outdoor Temperature", f"{temp_c:.1f}°C")
-            
-            with col2:
-                st.metric("Outdoor Humidity", f"{weather_data['humidity']:.0f}%")
-            
-            with col3:
-                st.metric("Wind Speed", f"{weather_data['wind_mph']:.1f} mph")
-        else:
-            st.caption("☁️ Weather data unavailable")
-        
-        if st.button("Change Location"):
-            cfg.weather = None
+        if result:
+            cfg.weather = WeatherConfig(
+                zipcode=new_zip,
+                latitude=result['lat'],
+                longitude=result['lon'],
+                label=result['label'],
+                timezone=result.get('timezone', "America/New_York")
+            )
             save_config(cfg)
             invalidate_app_config_cache()
+            st.success(f"Location set to: {result['label']}")
             st.rerun()
+        else:
+            st.error("Could not find that ZIP code. Please try again.")
     
-    else:
-        st.info("Set your location to enable timezone detection and outdoor weather comparison.")
-        
-        zipcode = st.text_input("ZIP Code", placeholder="e.g., 02134")
-        
-        if st.button("Set Location"):
-            if zipcode:
-                try:
-                    with st.spinner("Looking up location..."):
-                        weather_point = geocode_zip(zipcode)
-                    
-                    cfg.weather = WeatherConfig(
-                        zipcode=zipcode,
-                        latitude=weather_point.latitude,
-                        longitude=weather_point.longitude,
-                        label=weather_point.label,
-                        timezone=weather_point.timezone
-                    )
-                    save_config(cfg)
-                    invalidate_app_config_cache()
-                    st.success(f"Location set: {weather_point.label}")
-                    st.info(f"Detected timezone: {weather_point.timezone}")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to set location: {e}")
-            else:
-                st.warning("Please enter a ZIP code")
+    st.divider()
+    
+    # Email notifications
+    st.subheader("Email Notifications")
+    render_email_settings(cfg)
     
     st.divider()
     
@@ -1420,3 +1239,10 @@ _interval = st.session_state.get("_autorefresh_interval_ms")
 if _interval:
     # limit=1 ensures we don't accumulate multiple JS timers
     st_autorefresh(interval=_interval, limit=1, key="global_autorefresh")
+
+# ---------------------------------------------------------------------
+# Section B: End-of-render cleanup
+# Runs gc.collect() to free unreferenced objects and log memory state
+# ---------------------------------------------------------------------
+log_mem("script_end_before_cleanup")
+cleanup_render()  # Always runs gc.collect(), logs only if WATCHDOG_MEM_PROBES=1

@@ -1,3 +1,13 @@
+# Section C (Audit): systemd hardening for Watchdog Dashboard
+# 
+# Key changes from original:
+# - Added MemoryHigh=320M for gradual memory pressure handling
+# - MemoryMax=384M remains as hard ceiling
+# - Restart=always ensures recovery from OOM or crashes
+# - RestartSec=30s prevents rapid restart loops
+# - OOMScoreAdjust=500 makes dashboard lower priority than monitor daemon
+# - Environment supports memory probes via WATCHDOG_MEM_PROBES=1
+
 [Unit]
 Description=Watchdog Environmental Monitor - Dashboard
 After=watchdog-monitor.service
@@ -8,23 +18,46 @@ Type=simple
 User=__WATCHDOG_USER__
 Group=__WATCHDOG_GROUP__
 WorkingDirectory=__WATCHDOG_DIR__/monitor
+
+# Pre-start checks
 ExecStartPre=/usr/bin/test -x __WATCHDOG_DIR__/venv/bin/streamlit
 ExecStartPre=/usr/bin/test -f __WATCHDOG_DIR__/monitor/app.py
+
+# Main command
 ExecStart=__WATCHDOG_DIR__/venv/bin/streamlit run __WATCHDOG_DIR__/monitor/app.py --server.port 8501 --server.headless true --server.address 0.0.0.0
 
+# Section C: Restart policy - always restart on failure
 Restart=always
 RestartSec=30s
 
+# Environment
 Environment=PYTHONUNBUFFERED=1
+# Uncomment to enable memory probes (Section A):
+# Environment=WATCHDOG_MEM_PROBES=1
+# Uncomment to also enable tracemalloc (more expensive):
+# Environment=WATCHDOG_TRACEMALLOC=1
 
+# Section C: Memory limits for Pi Zero 2 W / Pi 3
+# MemoryHigh: Soft limit - system starts reclaiming when exceeded
+# MemoryMax: Hard limit - process killed if exceeded
+MemoryHigh=320M
 MemoryMax=384M
+
+# CPU limit - prevent runaway dashboard from starving monitor
 CPUQuota=50%
+
+# Section C: OOM priority - dashboard should be killed before monitor daemon
+# Higher score = more likely to be killed
 OOMScoreAdjust=500
+
+# Nice value - normal priority for dashboard
 Nice=0
 
+# Logging to systemd journal
 StandardOutput=journal
 StandardError=journal
 
+# Graceful shutdown timeout
 TimeoutStopSec=15
 
 [Install]

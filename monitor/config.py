@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Watchdog Environmental Monitor - Configuration
+
+MODIFIED: Added lazy singleton pattern for load_config() to prevent
+disk reads on every module import (Section A/B fix from audit).
 """
 
 from __future__ import annotations
@@ -32,6 +35,14 @@ KEYRING_EMAIL_KEY = "email_sender_password"
 # Bump this when config schema changes
 CONFIG_VERSION = 1
 
+# --------------------------------------------------------------------------
+# LAZY SINGLETON PATTERN (Section A/B fix from audit)
+# Prevents disk read on every import - only reads when file changes
+# --------------------------------------------------------------------------
+_cached_config: Optional["AppConfig"] = None
+_cached_config_mtime: float = 0.0
+_cached_config_path: Optional[Path] = None
+
 
 def _log():
     """
@@ -56,6 +67,52 @@ US_TIMEZONES = [
     ("America/Anchorage", "Alaska (AKT)"),
     ("Pacific/Honolulu", "Hawaii (HT)"),
 ]
+
+
+# ------------------------
+# Keyring helpers
+# ------------------------
+
+def get_email_password() -> str:
+    """Get email password from system keyring."""
+    try:
+        password = keyring.get_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
+        return password or ""
+    except Exception:
+        return ""
+
+
+def set_email_password(password: str) -> bool:
+    """Store email password in system keyring."""
+    try:
+        keyring.set_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY, password)
+        return True
+    except Exception:
+        return False
+
+
+def delete_email_password() -> bool:
+    """Remove email password from system keyring."""
+    try:
+        keyring.delete_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
+        return True
+    except Exception:
+        return False
+
+
+def migrate_plaintext_password(raw_config: dict) -> None:
+    """Migrate plaintext password to keyring if present."""
+    email_raw = raw_config.get("email", {})
+    password = email_raw.get("sender_password", "")
+    
+    # Skip if already migrated or empty
+    if not password or password == "__KEYRING__":
+        return
+    
+    # Migrate to keyring
+    if set_email_password(password):
+        email_raw["sender_password"] = "__KEYRING__"
+        _log().info("Migrated email password to system keyring")
 
 
 # ------------------------
@@ -115,6 +172,7 @@ class EmailConfig:
         # Fallback to config storage (less secure)
         self.sender_password = password
         return True
+
 
 # ------------------------
 # Archive configuration
@@ -329,11 +387,38 @@ def get_config_path() -> Path:
 
 
 def load_config() -> AppConfig:
+    """
+    Load configuration with lazy singleton caching.
+    
+    OPTIMIZATION (Section A/B from audit):
+    - Only reads from disk if file has changed (mtime check)
+    - Returns cached config if file unchanged
+    - Reduces I/O and memory churn on repeated imports/calls
+    """
+    global _cached_config, _cached_config_mtime, _cached_config_path
+    
     cfg_path = get_config_path()
+    
+    # Check if we can return cached config
+    try:
+        current_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else 0.0
+    except Exception:
+        current_mtime = 0.0
+    
+    # Return cached if path matches and file hasn't changed
+    if (_cached_config is not None and 
+        _cached_config_path == cfg_path and 
+        current_mtime == _cached_config_mtime and
+        current_mtime > 0):
+        return _cached_config
 
+    # Need to load from disk
     if not cfg_path.exists():
         cfg = AppConfig(sensors={})
         save_config(cfg)
+        _cached_config = cfg
+        _cached_config_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else 0.0
+        _cached_config_path = cfg_path
         return cfg
 
     try:
@@ -351,6 +436,11 @@ def load_config() -> AppConfig:
         if not is_valid:
             _log().warning("Config validation warnings: %s", "; ".join(errors))
 
+        # Update cache
+        _cached_config = cfg
+        _cached_config_mtime = current_mtime
+        _cached_config_path = cfg_path
+        
         return cfg
 
     except json.JSONDecodeError as e:
@@ -363,6 +453,12 @@ def load_config() -> AppConfig:
 
         cfg = AppConfig(sensors={})
         save_config(cfg)
+        
+        # Update cache
+        _cached_config = cfg
+        _cached_config_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else 0.0
+        _cached_config_path = cfg_path
+        
         return cfg
 
     except Exception as e:
@@ -371,8 +467,23 @@ def load_config() -> AppConfig:
         return cfg
 
 
+def invalidate_config_cache() -> None:
+    """
+    Invalidate the config cache, forcing next load_config() to read from disk.
+    
+    Call this after save_config() if you need immediate consistency,
+    though save_config() already updates the cache.
+    """
+    global _cached_config, _cached_config_mtime, _cached_config_path
+    _cached_config = None
+    _cached_config_mtime = 0.0
+    _cached_config_path = None
+
+
 def save_config(cfg: AppConfig) -> None:
     """Save config with alarm cleanup for removed sensors."""
+    global _cached_config, _cached_config_mtime, _cached_config_path
+    
     cfg_path = get_config_path()
 
     is_valid, errors = validate_config(cfg)
@@ -386,6 +497,12 @@ def save_config(cfg: AppConfig) -> None:
     try:
         tmp_path.write_text(cfg.to_json() + "\n", encoding="utf-8")
         tmp_path.replace(cfg_path)
+        
+        # Update cache after successful save
+        _cached_config = cfg
+        _cached_config_mtime = cfg_path.stat().st_mtime
+        _cached_config_path = cfg_path
+        
     except Exception:
         try:
             if tmp_path.exists():
@@ -399,74 +516,37 @@ def _cleanup_orphaned_alarms(cfg: AppConfig) -> None:
     """Clear alarms for sensors no longer in config."""
     try:
         from storage import get_db_path
-        from alert_engine import PersistentAlarmStore, Severity
+        import sqlite3
         
-        store = PersistentAlarmStore(get_db_path())
-        active_alarms = store.get_all_active()
-        configured_sensors = set(cfg.sensors.keys()) if cfg.sensors else set()
+        db_path = get_db_path()
+        if not db_path.exists():
+            return
         
-        # Also keep system alarms
-        configured_sensors.add("SYSTEM")
+        configured_ids = set(cfg.sensors.keys()) if cfg.sensors else set()
         
-        for alarm in active_alarms:
-            if alarm.sensor_id not in configured_sensors:
-                # Sensor was removed from config - clear the alarm
-                store.upsert_alarm(
-                    sensor_id=alarm.sensor_id,
-                    alert_type=alarm.alert_type,
-                    sensor_name=alarm.sensor_name,
-                    severity=Severity.NONE,
-                    message="",
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        try:
+            # Get all sensor IDs with active alarms
+            rows = conn.execute(
+                "SELECT DISTINCT sensor_id FROM alarm_state WHERE severity > 0"
+            ).fetchall()
+            
+            alarm_sensor_ids = {row[0] for row in rows}
+            
+            # Find orphaned (sensor removed from config but still has alarm)
+            orphaned = alarm_sensor_ids - configured_ids - {"SYSTEM"}
+            
+            if orphaned:
+                placeholders = ",".join(["?"] * len(orphaned))
+                conn.execute(
+                    f"UPDATE alarm_state SET severity = 0, cleared_ts = ? WHERE sensor_id IN ({placeholders})",
+                    [time.time()] + list(orphaned)
                 )
-                _log().info("Cleared orphaned alarm for removed sensor: %s", alarm.sensor_id)
+                conn.commit()
+                _log().info("Cleared orphaned alarms for removed sensors: %s", orphaned)
+        finally:
+            conn.close()
+            
     except Exception as e:
-        _log().warning("Could not cleanup orphaned alarms: %s", e)
-        
-        
-        
-def get_email_password() -> str:
-    """Retrieve email password from OS keyring."""
-    try:
-        password = keyring.get_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
-        return password or ""
-    except Exception as e:
-        _log().warning("Could not retrieve email password from keyring: %s", e)
-        return ""
-
-
-def set_email_password(password: str) -> bool:
-    """Store email password in OS keyring."""
-    try:
-        if password:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY, password)
-        else:
-            # Delete if empty
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_EMAIL_KEY)
-            except keyring.errors.PasswordDeleteError:
-                pass  # Already deleted
-        return True
-    except Exception as e:
-        _log().error("Could not store email password in keyring: %s", e)
-        return False
-
-
-def migrate_plaintext_password(cfg_data: dict) -> bool:
-    """
-    Migrate plaintext password from config to keyring.
-    Returns True if migration occurred.
-    """
-    email_data = cfg_data.get("email", {})
-    plaintext_pw = email_data.get("sender_password", "")
-    
-    if plaintext_pw and plaintext_pw != "__KEYRING__":
-        # Migrate to keyring
-        if set_email_password(plaintext_pw):
-            # Mark as migrated (don't store actual password)
-            email_data["sender_password"] = "__KEYRING__"
-            cfg_data["email"] = email_data
-            _log().info("Migrated email password to secure keyring storage")
-            return True
-        else:
-            _log().warning("Could not migrate password to keyring, keeping in config")
-    return False
+        # Non-fatal: just log and continue
+        _log().warning("Could not clean up orphaned alarms: %s", e)
