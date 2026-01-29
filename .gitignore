@@ -49,3 +49,4 @@ desktop/releases/
 desktop/Validation/
 desktop/__pycache__/
 desktop/.build-venv/
+patches/
