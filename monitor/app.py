@@ -59,6 +59,45 @@ CHART_MAX_POINTS_MONTH = 360   # Same (30d at 2h buckets)
 # P0 performance: cached trends queries
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=5, show_spinner=False)
+def _get_health_data(seconds: int, max_points: int, db_path_str: str):
+    """
+    Returns (latest_dict_or_None, timeseries_list_of_dicts)
+    - latest: newest row in system_health
+    - timeseries: downsampled buckets from health_sampler.get_recent_samples
+    """
+    conn = get_connection(db_path_str)
+    try:
+        row = conn.execute("""
+            SELECT ts, mem_total_mb, mem_avail_mb, mem_used_mb,
+                   swap_total_mb, swap_used_mb,
+                   load_1m, load_5m, load_15m,
+                   monitor_rss_mb, dashboard_rss_mb
+            FROM system_health
+            ORDER BY ts DESC
+            LIMIT 1
+        """).fetchone()
+
+        latest = None
+        if row:
+            cols = [
+                "ts","mem_total_mb","mem_avail_mb","mem_used_mb",
+                "swap_total_mb","swap_used_mb",
+                "load_1m","load_5m","load_15m",
+                "monitor_rss_mb","dashboard_rss_mb"
+            ]
+            latest = dict(zip(cols, row))
+            # Normalize None -> 0 for arithmetic
+            latest["monitor_rss_mb"] = latest["monitor_rss_mb"] or 0
+            latest["dashboard_rss_mb"] = latest["dashboard_rss_mb"] or 0
+
+        timeseries = get_recent_samples(conn, seconds=seconds, max_points=max_points)
+        return latest, timeseries
+    except Exception:
+        return None, []
+    finally:
+        conn.close()
+        
+@st.cache_data(ttl=5, show_spinner=False)
 def _cached_trends_fast(sensor_ids_tuple, start_ts, end_ts, bucket_seconds, max_points_per_sensor, db_path_str):
     """Short TTL cache for live hour view."""
     log_mem("cached_trends_fast_start")  # Section A instrumentation
@@ -377,7 +416,7 @@ st.title("🐕 Watchdog Environmental Monitor")
 st.caption("Production Environmental Monitoring with Self-Healing")
 
 # Top-level tabs
-tab1, tab2, tab3 = st.tabs(["📊 Monitoring", "⚙️ Setup", "🔧 Settings"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Monitoring", "⚙️ Setup", "🔧 Settings", "🖥️ System Health"])
 
 # ====================
 # TAB 1: MONITORING (OSS-STYLE)
@@ -389,7 +428,7 @@ with tab1:
     
     # Check monitoring status
     status = get_cached_monitoring_status()
-    
+    is_running = bool(status.get("is_running", False))
     # === First-run onboarding ===
     is_onboarding = is_first_run(cfg)
     
@@ -402,48 +441,12 @@ with tab1:
         # ===========================================
         # NORMAL MONITORING UI (only when not onboarding)
         # ===========================================
+        # Pull lightweight health snapshot for warnings (traffic lights live in System Health tab)
+        try:
+            health = get_system_health(window_s=300)
+        except Exception:
+            health = {}
         
-        # --------------------
-        # System Health panel
-        # --------------------
-        health = get_system_health(window_s=300)
-
-        # Compute simple status lights
-        is_running = bool(status.get("is_running", False))
-        age = health.get("last_reading_age_s", None)
-        sensors_5m = int(health.get("distinct_sensors_window", 0) or 0)
-
-        # Freshness thresholds (tune later)
-        if (age is None) or (not health.get("db_ok", False)):
-            freshness_light = "🔴"
-            freshness_text = "No readings yet"
-        elif age <= 120:
-            freshness_light = "🟢"
-            freshness_text = f"{int(age)}s ago"
-        elif age <= 600:
-            freshness_light = "🟡"
-            freshness_text = f"{int(age)}s ago"
-        else:
-            freshness_light = "🔴"
-            freshness_text = f"{int(age)}s ago"
-
-        run_light = "🟢" if is_running else "🔴"
-        bt = health.get("bluetooth_powered", None)
-        bt_light = "🟢" if bt is True else ("🔴" if bt is False else "🟡")
-        bt_text = "Powered" if bt is True else ("Off" if bt is False else "Unknown")
-
-        st.markdown("### 🩺 System Health")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("Monitor service", f"{run_light} {'Running' if is_running else 'Stopped'}")
-        with c2:
-            st.metric("Bluetooth", f"{bt_light} {bt_text}")
-        with c3:
-            st.metric("Sensors (last 5m)", f"{'🟢' if sensors_5m > 0 else '🔴'} {sensors_5m}")
-        with c4:
-            db_ok = bool(health.get("db_ok", False))
-            st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
-
         # Section B: Memory pressure warning
         if health.get("memory_pressure", False):
             mem_pct = health.get("memory_percent", 0)
@@ -1235,6 +1238,123 @@ with col_refresh:
     if st.button("🔄 Refresh Page", use_container_width=True, key="footer_refresh"):
         get_system_health.clear()
         st.rerun()
+
+# ====================
+# TAB 4: SYSTEM HEALTH
+# ====================
+
+with tab4:
+    st.markdown("### 🖥️ System Health")
+
+# --------------------
+    # System Health panel
+    # --------------------
+    health = get_system_health(window_s=300)
+
+    # Compute simple status lights
+    is_running = bool(status.get("is_running", False))
+    age = health.get("last_reading_age_s", None)
+    sensors_5m = int(health.get("distinct_sensors_window", 0) or 0)
+
+    # Freshness thresholds (tune later)
+    if (age is None) or (not health.get("db_ok", False)):
+        freshness_light = "🔴"
+        freshness_text = "No readings yet"
+    elif age <= 120:
+        freshness_light = "🟢"
+        freshness_text = f"{int(age)}s ago"
+    elif age <= 600:
+        freshness_light = "🟡"
+        freshness_text = f"{int(age)}s ago"
+    else:
+        freshness_light = "🔴"
+        freshness_text = f"{int(age)}s ago"
+
+    run_light = "🟢" if is_running else "🔴"
+    bt = health.get("bluetooth_powered", None)
+    bt_light = "🟢" if bt is True else ("🔴" if bt is False else "🟡")
+    bt_text = "Powered" if bt is True else ("Off" if bt is False else "Unknown")
+
+    st.markdown("### 🩺 System Health")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Monitor service", f"{run_light} {'Running' if is_running else 'Stopped'}")
+    with c2:
+        st.metric("Bluetooth", f"{bt_light} {bt_text}")
+    with c3:
+        st.metric("Sensors (last 5m)", f"{'🟢' if sensors_5m > 0 else '🔴'} {sensors_5m}")
+    with c4:
+        db_ok = bool(health.get("db_ok", False))
+        st.metric("Database", f"{'🟢' if db_ok else '🔴'} {'OK' if db_ok else 'Error'}")
+
+
+    health_range = st.radio(
+        "Time Range",
+        ["5 min", "1 hour", "24 hours"],
+        index=1,
+        horizontal=True,
+        key="health_time_range",
+    )
+    seconds_map = {"5 min": 300, "1 hour": 3600, "24 hours": 86400}
+    seconds = seconds_map[health_range]
+
+    latest, timeseries = _get_health_data(seconds=seconds, max_points=300, db_path_str=str(get_db_path()))
+
+    if latest is None:
+        st.warning("⏳ No health data yet. The health sampler starts collecting when the monitor service runs.")
+        st.info("Health data is collected every 5 seconds and retained for 24 hours.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+
+        mem_pct = (latest["mem_used_mb"] / latest["mem_total_mb"] * 100) if latest["mem_total_mb"] else 0
+        mem_status = "🟢" if mem_pct < 70 else "🟡" if mem_pct < 85 else "🔴"
+
+        swap_pct = (latest["swap_used_mb"] / latest["swap_total_mb"] * 100) if latest["swap_total_mb"] else 0
+        swap_status = "🟢" if swap_pct < 30 else "🟡" if swap_pct < 70 else "🔴"
+
+        with col1:
+            st.metric(f"{mem_status} Memory", f"{latest['mem_used_mb']:.0f} MB",
+                      f"{mem_pct:.0f}% of {latest['mem_total_mb']:.0f} MB")
+        with col2:
+            st.metric(f"{swap_status} Swap", f"{latest['swap_used_mb']:.0f} MB",
+                      f"{swap_pct:.0f}% of {latest['swap_total_mb']:.0f} MB")
+        with col3:
+            load_status = "🟢" if latest["load_1m"] < 1.0 else "🟡" if latest["load_1m"] < 2.0 else "🔴"
+            st.metric(f"{load_status} CPU Load", f"{latest['load_1m']:.2f}",
+                      f"5m: {latest['load_5m']:.2f} | 15m: {latest['load_15m']:.2f}")
+        with col4:
+            total_proc_mb = (latest["monitor_rss_mb"] or 0) + (latest["dashboard_rss_mb"] or 0)
+            st.metric("🔧 Process RSS", f"{total_proc_mb:.0f} MB",
+                      f"Mon: {latest['monitor_rss_mb']:.0f} | Dash: {latest['dashboard_rss_mb']:.0f}")
+
+        if timeseries:
+            df = pd.DataFrame(timeseries)
+            # health_sampler buckets are "ts_bucket" in your current implementation
+            ts_col = "ts_bucket" if "ts_bucket" in df.columns else "ts"
+            df["datetime"] = pd.to_datetime(df[ts_col], unit="s")
+
+            st.markdown("---")
+            st.markdown("#### Memory Usage")
+            st.area_chart(df.set_index("datetime")[["mem_used_mb"]], use_container_width=True, height=200)
+
+            if latest["swap_total_mb"] > 0:
+                st.markdown("#### Swap Usage")
+                st.area_chart(df.set_index("datetime")[["swap_used_mb"]], use_container_width=True, height=150)
+
+            st.markdown("#### CPU Load Average")
+            st.line_chart(df.set_index("datetime")[["load_1m"]], use_container_width=True, height=200)
+
+            if ("monitor_rss_mb" in df.columns) or ("dashboard_rss_mb" in df.columns):
+                cols = [c for c in ["monitor_rss_mb", "dashboard_rss_mb"] if c in df.columns]
+                if cols:
+                    st.markdown("#### Process Memory (RSS)")
+                    st.area_chart(df.set_index("datetime")[cols], use_container_width=True, height=150)
+
+        st.markdown("---")
+        st.caption(
+            f"📊 Data points: {len(timeseries)} | Sample interval: 5s | Retention: 24h | "
+            f"Last update: {datetime.fromtimestamp(latest['ts']).strftime('%H:%M:%S')}"
+        )
 
 # ---------------------------------------------------------------------
 # Global autorefresh (single timer per rerun)

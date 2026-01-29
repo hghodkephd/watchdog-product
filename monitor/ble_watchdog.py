@@ -16,6 +16,8 @@ import threading
 import time
 from typing import Optional
 
+
+
 try:
     import sdnotify
 except ImportError:
@@ -54,6 +56,9 @@ from storage import Reading, DatabaseWriter, get_db_path
 
 # Import the background alert engine
 from alert_engine import start_alert_engine, stop_alert_engine, get_alert_engine
+# Import the health sampler
+from health_sampler import start_health_sampler, stop_health_sampler, get_health_sampler
+
 
 _log_ble = get_logger("watchdog.ble")
 _log_db = get_logger("watchdog.db")
@@ -366,7 +371,15 @@ class WatchdogMonitor:
         )
         _log_core.info("Alert engine started (checking every 60s)")
         print("[watchdog] Alert engine started - notifications will work 24/7", file=sys.stderr, flush=True)
-        
+ 
+        # === START HEALTH SAMPLER ===
+        try:
+            _log_core.info("Starting health sampler...")
+            start_health_sampler(db_path=get_db_path())
+            _log_core.info("Health sampler started (sampling every 5s)")
+        except Exception as e:
+            _log_core.warning("Health sampler failed to start (non-fatal): %s", e)
+
         # Quick check for BLE adapter (fail fast, recover in loop)
         ble_ready = self._wait_for_ble_adapter()
         
@@ -515,6 +528,14 @@ class WatchdogMonitor:
                 _log_core.info("Alert engine stopped")
         except Exception:
             _log_core.exception("Error stopping alert engine")
+
+        # Stop health sampler
+        try:
+            _log_core.info("Stopping health sampler...")
+            stop_health_sampler()
+            _log_core.info("Health sampler stopped")
+        except Exception:
+            _log_core.exception("Error stopping health sampler")
         
         # Stop OSS scanner (thread-safe stop event)
         try:

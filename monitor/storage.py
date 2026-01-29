@@ -144,7 +144,71 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    
+    def init_db_health_extension(conn: sqlite3.Connection) -> None:
+        """
+        Add system_health table to existing database.
+        
+        This is a supplement to init_db() - add this code inside init_db() after
+        the system_stats table creation.
+        
+        The system_health table stores periodic samples of system metrics
+        collected by the health_sampler daemon for the System Health dashboard tab.
+        """
+        # System health table (for health_sampler.py)
+        # Stores memory, swap, CPU load metrics for System Health dashboard tab
+        conn.executescript("""
+            -- System health metrics table
+            -- Populated by health_sampler.py daemon (every 5 seconds)
+            -- Retention: 24 hours (17,280 rows max)
+            CREATE TABLE IF NOT EXISTS system_health (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,                    -- Unix timestamp
+                mem_total_mb INTEGER NOT NULL,       -- Total system RAM (MB)
+                mem_avail_mb INTEGER NOT NULL,       -- Available RAM (MB)
+                mem_used_mb INTEGER NOT NULL,        -- Used RAM (MB)
+                swap_total_mb INTEGER NOT NULL,      -- Total swap (MB)
+                swap_used_mb INTEGER NOT NULL,       -- Used swap (MB)
+                load_1m REAL NOT NULL,               -- 1-minute load average
+                load_5m REAL NOT NULL,               -- 5-minute load average
+                load_15m REAL NOT NULL,              -- 15-minute load average
+                monitor_rss_mb INTEGER,              -- ble_watchdog process RSS (optional)
+                dashboard_rss_mb INTEGER             -- streamlit process RSS (optional)
+            );
+            
+            -- Index for efficient time-range queries
+            CREATE INDEX IF NOT EXISTS idx_system_health_ts
+            ON system_health(ts);
+        """)
+        conn.commit()
 
+def get_health_samples_for_chart(
+    conn: sqlite3.Connection, 
+    seconds: int, 
+    max_points: int = 300
+) -> list:
+    """
+    Thin wrapper around health_sampler.get_recent_samples() for dashboard use.
+    
+    Imported here to avoid circular imports when called from app.py.
+    
+    Args:
+        conn: SQLite connection
+        seconds: How many seconds of history to fetch
+        max_points: Maximum points to return (downsamples if needed)
+    
+    Returns:
+        List of dicts with health sample data
+    """
+    try:
+        from health_sampler import get_recent_samples
+        return get_recent_samples(conn, seconds, max_points)
+    except ImportError:
+        # health_sampler.py not yet installed
+        return []
+    except Exception:
+        return []
+    
 def get_downsampled_timeseries(
     conn: sqlite3.Connection,
     sensor_ids: Sequence[str],
